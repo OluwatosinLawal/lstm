@@ -1,0 +1,8 @@
+venv/
+.venv/
+data/
+outputs/
+model/
+*.keras
+pycache__/
+*.pkl
