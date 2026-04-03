@@ -1,10 +1,5 @@
 .DS_Store
-
 venv/
 .venv/
 data/
-outputs/
-model/
-*.keras
-pycache__/
-*.pkl
+__pycache__/
