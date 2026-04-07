@@ -2,7 +2,7 @@
 #  LSTM-BASED PRODUCT DEMAND FORECASTING SYSTEM
 #  Project : Design and Development of an LSTM-Based Product Demand
 #            Forecasting System from Historical Sales Data
-#  Company : Alerzo Limited (Nigerian B2B E-Commerce)
+#  Company : Nigerian B2B E-Commerce
 #  Period  : January 1, 2023 – November 22, 2025
 #  Author  : Oluwatosin Oluwabukola Lawal
 #  Tool    : Python 3.11.9 | VS Code | TensorFlow / Keras
@@ -80,8 +80,8 @@ print(f"   numpy       : {np.__version__}")
 # =============================================================================
 
 # ── Folder where your 5 cleaned CSV files live ──
-# Example: If your files are in C:\Users\YourName\Documents\alerzo\data\cleaned
-# then set DATA_DIR = r"C:\Users\YourName\Documents\alerzo\data\cleaned"
+# Example: If your files are in C:\Users\YourName\Documents\lstm\data\cleaned
+# then set DATA_DIR = r"C:\Users\YourName\Documents\lstm\data\cleaned"
 DATA_DIR = "./data/cleaned"
 
 # ── Exact CSV filenames (adjust if yours differ) ──
@@ -279,7 +279,7 @@ axes[0].plot(
     daily["date"], daily["total_sales"], color="#1565C0", linewidth=0.7, alpha=0.8
 )
 axes[0].set_title(
-    "Alerzo – Daily Total Sales (Jan 2023 – Nov 2025)", fontsize=13, fontweight="bold"
+    "Company X - Daily Total Sales (Jan 2023 – Nov 2025)", fontsize=13, fontweight="bold"
 )
 axes[0].set_ylabel("Total Sales (₦)")
 axes[0].xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))

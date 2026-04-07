@@ -1,5 +1,5 @@
 # =============================================================================
-#  ALERZO LSTM DEMAND FORECASTING — STREAMLIT APP
+#  AN LSTM DEMAND FORECASTING — STREAMLIT APP
 #  File : app.py
 #  Run  : streamlit run app.py
 #
@@ -25,7 +25,7 @@ import matplotlib.dates as mdates
 import streamlit as st
 
 st.set_page_config(
-    page_title="Alerzo Demand Forecasting",
+    page_title="LSTM Demand Forecasting",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -201,14 +201,14 @@ with st.sidebar:
         st.caption("to see live metrics here")
 
     st.markdown("---")
-    st.caption("Alerzo B2B Demand Forecasting")
+    st.caption("Nigerian B2B Demand Forecasting")
     st.caption("Postgraduate Diploma Research")
 
 # =============================================================================
 # PAGE: HOME
 # =============================================================================
 if page == "🏠 Home":
-    st.title("Alerzo Product Demand Forecasting System")
+    st.title("LSTM Product Demand Forecasting System")
     st.markdown("##### LSTM-Based Daily Sales Forecasting | Jan 2023 – Nov 2025")
     st.markdown("---")
 
@@ -511,7 +511,7 @@ elif page == "ℹ️ About":
     st.title("About This Project")
     st.markdown("""
 ### Design and Development of an LSTM-Based Product Demand Forecasting System
-Postgraduate Diploma Research — Alerzo Limited (Nigerian B2B E-Commerce)
+Postgraduate Diploma Research — Nigerian B2B E-Commerce
 
 ---
 ### Data
