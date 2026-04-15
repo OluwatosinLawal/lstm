@@ -505,8 +505,12 @@ elif page == "📂 Upload & Forecast":
     # Read raw files
     raw_frames = []
     for f in files:
-        raw_frames.append(pd.read_csv(f, low_memory=False))
-        raw_frames[-1].columns = raw_frames[-1].columns.str.strip()
+        try:
+            raw_frames.append(pd.read_csv(f, low_memory=False, encoding='utf-8'))
+        except UnicodeDecodeError:
+            f.seek(0) # Reset the file pointer just like we did before
+            raw_frames.append(pd.read_csv(f, low_memory=False, encoding='latin1'))
+            raw_frames[-1].columns = raw_frames[-1].columns.str.strip()
     raw_df = pd.concat(raw_frames, ignore_index=True)
 
     st.markdown(
