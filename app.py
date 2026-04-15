@@ -37,37 +37,53 @@ st.set_page_config(
 # ── CSS ───────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-.metric-card {
-    background: #f0f4ff;
-    border-radius: 10px;
-    padding: 16px 20px;
-    margin-bottom: 12px;
-    border-left: 4px solid #1565C0;
-}
-.metric-label { font-size: 13px; color: #555; margin-bottom: 4px; }
-.metric-value { font-size: 22px; font-weight: bold; color: #1565C0; }
-.step-box {
-    background: #f8f9ff;
-    border-left: 4px solid #7F77DD;
-    border-radius: 6px;
-    padding: 12px 16px;
-    margin: 6px 0 12px 0;
-}
-.explain-box {
-    background: #e8f5e9;
-    border-left: 4px solid #2E7D32;
-    border-radius: 6px;
-    padding: 14px 18px;
-    margin: 10px 0;
-}
-.warn-box {
-    background: #fff8e1;
-    border-left: 4px solid #f9a825;
-    border-radius: 6px;
-    padding: 12px 16px;
-    margin: 8px 0;
-}
-.col-table th { background: #e8eaf6; }
+    .metric-card {
+        background: #1b3a2e;
+        border-radius: 10px;
+        padding: 16px 20px;
+        margin-bottom: 12px;
+        border-left: 4px solid #4caf82;
+    }
+    .metric-label { font-size: 13px; color: #a8d5b5; margin-bottom: 4px; }
+    .metric-value { font-size: 22px; font-weight: bold; color: #c8f7dc; }
+
+    .explain-box {
+        background: #1a3d2b;
+        border-left: 5px solid #4caf82;
+        border-radius: 6px;
+        padding: 16px 20px;
+        margin: 12px 0;
+        color: #d4f5c0 !important;
+        font-size: 14px;
+        line-height: 1.7;
+    }
+    .explain-box strong {
+        color: #b8ffcc !important;
+    }
+    .explain-box em {
+        color: #a8f0b8 !important;
+        font-style: italic;
+    }
+
+    .step-box {
+        background: #1e2a3a;
+        border-left: 4px solid #7F77DD;
+        border-radius: 6px;
+        padding: 12px 16px;
+        margin: 6px 0 12px 0;
+        color: #c8d8f0 !important;
+        font-size: 13px;
+    }
+
+    .warn-box {
+        background: #3a2e10;
+        border-left: 4px solid #f9a825;
+        border-radius: 6px;
+        padding: 12px 16px;
+        margin: 8px 0;
+        color: #f5dfa0 !important;
+        font-size: 13px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
