@@ -768,8 +768,15 @@ elif page == "🔮 Future Predictions":
         st.info("Waiting for file upload…")
         st.stop()
 
-    raw = pd.read_csv(up, low_memory=False)
-    raw.columns = raw.columns.str.strip()
+    # Purpose: Safely read the uploaded CSV by attempting standard UTF-8 first.
+    # If a special character causes a UnicodeDecodeError, reset the file
+    # pointer to the start and try again with the 'latin1' encoding.
+    try:
+        raw = pd.read_csv(up, low_memory=False, encoding='utf-8')
+    except UnicodeDecodeError:
+        up.seek(0)  # Reset the Streamlit file pointer to the beginning
+        raw = pd.read_csv(up, low_memory=False, encoding='latin1')
+        raw.columns = raw.columns.str.strip()
 
     st.markdown("#### Map your columns")
     mapping = map_columns(raw)
