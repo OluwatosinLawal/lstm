@@ -1,5 +1,5 @@
 # =============================================================================
-#  LSTM DEMAND FORECASTING — STREAMLIT APP  (Full Version v4)
+#  LSTM DEMAND FORECASTING — STREAMLIT APP  (v5)
 #  Run : streamlit run app.py
 # =============================================================================
 
@@ -12,8 +12,8 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import streamlit as st
 from sklearn.metrics import mean_squared_error, mean_absolute_error
+from sklearn.preprocessing import MinMaxScaler
 
-# ── Page config ───────────────────────────────────────────────────
 st.set_page_config(
     page_title="LSTM Demand Forecasting",
     page_icon="📈",
@@ -45,7 +45,7 @@ st.markdown("""
     line-height: 1.7;
 }
 .explain-box strong { color: #b8ffcc !important; }
-.explain-box em { color: #a8f0b8 !important; font-style: italic; }
+.explain-box em     { color: #a8f0b8 !important; font-style: italic; }
 
 .step-box {
     background: #1e2a3a;
@@ -56,7 +56,6 @@ st.markdown("""
     color: #c8d8f0 !important;
     font-size: 13px;
 }
-
 .warn-box {
     background: #3a2e10;
     border-left: 4px solid #f9a825;
@@ -67,10 +66,14 @@ st.markdown("""
     font-size: 13px;
 }
 
-.acc-excellent { background:#1a3d2b; color:#b8ffcc; padding:4px 10px; border-radius:4px; font-weight:bold; }
-.acc-good      { background:#1a2e3d; color:#a8d5f5; padding:4px 10px; border-radius:4px; font-weight:bold; }
-.acc-fair      { background:#3a3010; color:#f5e0a0; padding:4px 10px; border-radius:4px; font-weight:bold; }
-.acc-poor      { background:#3d1a1a; color:#f5b0b0; padding:4px 10px; border-radius:4px; font-weight:bold; }
+.acc-excellent { background:#1a3d2b; color:#b8ffcc; padding:4px 10px;
+                 border-radius:4px; font-weight:bold; display:inline-block; }
+.acc-good      { background:#1a2e3d; color:#a8d5f5; padding:4px 10px;
+                 border-radius:4px; font-weight:bold; display:inline-block; }
+.acc-fair      { background:#3a3010; color:#f5e0a0; padding:4px 10px;
+                 border-radius:4px; font-weight:bold; display:inline-block; }
+.acc-poor      { background:#3d1a1a; color:#f5b0b0; padding:4px 10px;
+                 border-radius:4px; font-weight:bold; display:inline-block; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -80,37 +83,44 @@ MODEL_PATH  = os.path.join(BASE_DIR, "model", "lstm_demand_forecast.keras")
 SCALER_PATH = os.path.join(BASE_DIR, "model", "scaler.pkl")
 CSV_PATH    = os.path.join(BASE_DIR, "outputs", "model_comparison.csv")
 OUT_DIR     = os.path.join(BASE_DIR, "outputs")
+LOOK_BACK   = 60
 
-LOOK_BACK = 60
-
-# Accuracy scale from supervisor
+# ── Accuracy helpers ──────────────────────────────────────────────
 def accuracy_label(smape_val):
-    if smape_val < 10:
-        return "Excellent / Highly Accurate", "acc-excellent"
-    elif smape_val < 25:
-        return "Good", "acc-good"
-    elif smape_val < 50:
-        return "Reasonable / Fair", "acc-fair"
-    else:
-        return "Inaccurate", "acc-poor"
+    if smape_val < 10:   return "Excellent / Highly Accurate", "acc-excellent"
+    elif smape_val < 25: return "Good", "acc-good"
+    elif smape_val < 50: return "Reasonable / Fair", "acc-fair"
+    else:                return "Inaccurate", "acc-poor"
 
+def acc_scale_table():
+    """Renders the accuracy scale table — only call this after forecast results."""
+    st.markdown("""
+**Accuracy scale reference**
+
+| MAPE | sMAPE | Rating |
+|---|---|---|
+| < 10% | < 10% | Excellent / Highly Accurate |
+| 10% – 20% | 10% – 25% | Good |
+| 20% – 50% | 25% – 50% | Reasonable / Fair |
+| > 50% | > 50% | Inaccurate |
+""")
 
 # ══════════════════════════════════════════════════════════════════
-# HELPERS
+# CORE HELPERS
 # ══════════════════════════════════════════════════════════════════
 
 @st.cache_resource
 def load_model_and_scaler():
     if not os.path.exists(MODEL_PATH):
-        return None, None, f"Model file not found: {MODEL_PATH}"
+        return None, None, f"Not found: {MODEL_PATH}"
     if not os.path.exists(SCALER_PATH):
-        return None, None, f"Scaler file not found: {SCALER_PATH}"
+        return None, None, f"Not found: {SCALER_PATH}"
     try:
         from tensorflow.keras.models import load_model
-        model = load_model(MODEL_PATH)
+        m = load_model(MODEL_PATH)
         with open(SCALER_PATH, "rb") as f:
-            scaler = pickle.load(f)
-        return model, scaler, None
+            s = pickle.load(f)
+        return m, s, None
     except Exception as e:
         return None, None, str(e)
 
@@ -129,57 +139,36 @@ def load_comparison_csv():
             if col in num.columns:
                 num[col] = num[col].apply(to_float)
         return df, num
-    except Exception as e:
+    except:
         return None, None
 
 
-def read_and_merge_files(uploaded_files):
-    """
-    Reads multiple CSV files and merges them into one DataFrame.
-    Handles files with the same columns regardless of order.
-    """
+def read_and_merge(files):
     frames = []
-    for f in uploaded_files:
-        df = pd.read_csv(f, low_memory=False)
-        df.columns = df.columns.str.strip()
-        frames.append(df)
-    if not frames:
-        return None
-    merged = pd.concat(frames, ignore_index=True)
-    return merged
+    for f in files:
+        d = pd.read_csv(f, low_memory=False)
+        d.columns = d.columns.str.strip()
+        frames.append(d)
+    return pd.concat(frames, ignore_index=True) if frames else None
 
 
-def clean_dataframe(df, date_col, amount_col, qty_col=None,
-                    product_col=None, product_id_col=None):
-    """
-    Clean the dataframe: strip whitespace, parse dates, convert numerics.
-    Returns cleaned df.
-    """
+def clean_df(df, date_col, val_col, qty_col=None):
     df = df.copy()
     df.columns = df.columns.str.strip()
-    df = df.apply(lambda col: col.str.strip() if col.dtype == "object" else col)
-
-    # Numeric columns
-    for col in [amount_col, qty_col, "unitPrice", "orderTotal"]:
+    df = df.apply(lambda c: c.str.strip() if c.dtype=="object" else c)
+    for col in [val_col, qty_col, "unitPrice", "orderTotal"]:
         if col and col in df.columns:
             df[col] = pd.to_numeric(
                 df[col].astype(str).str.replace(",","",regex=False), errors="coerce"
             )
-
-    # Date parsing (dayfirst for DD/MM/YYYY)
     df[date_col] = pd.to_datetime(df[date_col], dayfirst=True, errors="coerce")
     df = df.dropna(subset=[date_col])
     return df
 
 
-def get_product_categories(df, product_id_col):
-    """
-    Extract product categories from productId prefix e.g. NGA-FDI, NGA-BEV.
-    Returns a dict: {category_code: full_label}
-    """
-    if product_id_col not in df.columns:
+def get_categories(df, pid_col):
+    if pid_col not in df.columns:
         return {}
-    prefixes = df[product_id_col].dropna().str.extract(r"NGA-([A-Z]+)-")[0].dropna().unique()
     label_map = {
         "FDI": "Food Items (FDI)",
         "BEV": "Beverages (BEV)",
@@ -187,37 +176,42 @@ def get_product_categories(df, product_id_col):
         "PRF": "Personal & Cooking (PRF)",
         "PHA": "Pharmacy (PHA)",
         "AGR": "Agriculture (AGR)",
-        "OTH": "Other",
     }
-    return {p: label_map.get(p, f"Category {p}") for p in sorted(prefixes)}
+    codes = df[pid_col].dropna().str.extract(r"NGA-([A-Z]+)-")[0].dropna().unique()
+    return {label_map.get(c, f"Category {c}"): c for c in sorted(codes)}
 
 
-def filter_by_category(df, product_id_col, category_code):
-    if category_code == "ALL":
-        return df
-    mask = df[product_id_col].str.contains(f"NGA-{category_code}-", na=False)
-    return df[mask]
-
-
-def aggregate_series(df, date_col, value_col, freq):
+def aggregate(df, date_col, val_col, freq, product_filter=None,
+              prod_col=None, pid_col=None, cat_code=None, products=None):
     """
-    Aggregate to daily ('D') or monthly ('MS') frequency.
-    Returns a clean (date, total_value) DataFrame.
+    Aggregate df to chosen frequency after optional category/product filtering.
+    Returns a (date, total) series DataFrame.
     """
+    d = df.copy()
+
+    # Filter by category
+    if cat_code and cat_code != "ALL" and pid_col and pid_col in d.columns:
+        d = d[d[pid_col].str.contains(f"NGA-{cat_code}-", na=False)]
+
+    # Filter by specific products
+    if products and prod_col and prod_col in d.columns:
+        d = d[d[prod_col].isin(products)]
+
+    if len(d) == 0:
+        return None
+
     series = (
-        df.groupby(date_col)[value_col].sum()
+        d.groupby(date_col)[val_col].sum()
         .reset_index()
-        .rename(columns={date_col: "date", value_col: "total"})
+        .rename(columns={date_col:"date", val_col:"total"})
         .sort_values("date")
     )
-    # Resample to chosen frequency
     series = (
         series.set_index("date")
         .resample(freq)["total"].sum()
         .reset_index()
     )
     series = series[series["total"] > 0].reset_index(drop=True)
-    # Remove bottom 1% outliers
     thresh = series["total"].quantile(0.01)
     series = series[series["total"] > thresh].reset_index(drop=True)
     return series
@@ -231,59 +225,227 @@ def make_sequences(data, lb=60):
     return np.array(X), np.array(y)
 
 
-def calc_smape(y_true, y_pred):
-    return float(np.mean(
-        2*np.abs(y_true-y_pred)/(np.abs(y_true)+np.abs(y_pred)+1e-8)
-    )*100)
+def calc_smape(yt, yp):
+    return float(np.mean(2*np.abs(yt-yp)/(np.abs(yt)+np.abs(yp)+1e-8))*100)
 
 
-def calc_mape(y_true, y_pred, mean_val):
-    mask = y_true > mean_val * 0.01
+def calc_mape(yt, yp, mean_v):
+    mask = yt > mean_v * 0.01
     if mask.sum() == 0:
         return np.nan, 0
-    m = float(np.mean(np.abs((y_true[mask]-y_pred[mask])/y_true[mask]))*100)
-    return m, int(mask.sum())
+    return float(np.mean(np.abs((yt[mask]-yp[mask])/yt[mask]))*100), int(mask.sum())
 
 
-def rolling_forecast(model, scaler, seed_window, n_steps):
-    """
-    Generates n_steps future predictions using rolling one-step-ahead inference.
-    seed_window: 1D array of raw (un-normalised) values, length >= LOOK_BACK.
-    """
-    s = scaler.transform(seed_window[-LOOK_BACK:].reshape(-1, 1)).flatten()
-    window = list(s)
+def rolling_forecast(model, sc, seed, n):
+    s = sc.transform(seed[-LOOK_BACK:].reshape(-1,1)).flatten()
+    w = list(s)
     out = []
-    for _ in range(n_steps):
-        x = np.array(window[-LOOK_BACK:]).reshape(1, LOOK_BACK, 1)
-        p = model.predict(x, verbose=0)[0, 0]
-        out.append(p)
-        window.append(p)
-    raw = scaler.inverse_transform(np.array(out).reshape(-1, 1)).flatten()
-    return np.maximum(raw, 0)
+    for _ in range(n):
+        x = np.array(w[-LOOK_BACK:]).reshape(1, LOOK_BACK, 1)
+        p = model.predict(x, verbose=0)[0,0]
+        out.append(p); w.append(p)
+    return np.maximum(sc.inverse_transform(np.array(out).reshape(-1,1)).flatten(), 0)
 
 
-def show_column_guide():
+def show_col_guide():
     st.markdown("""
-| Column name | Status | Description |
+| Column | Status | Description |
 |---|---|---|
-| `orderDate` | **Required** | Order date — format DD/MM/YYYY (e.g. `05/01/2023`) |
-| `final_amount` | **Required*** | Sales value per order line (₦). Plain numbers only — no commas or symbols. |
-| `quantitySold` | **Required*** | Units sold per order line. Required if forecasting quantity. |
+| `orderDate` | **Required** | Date — format DD/MM/YYYY |
+| `final_amount` | **Required*** | Sales value per order line (₦) — plain numbers only |
+| `quantitySold` | **Required*** | Units sold — required if forecasting quantity |
 | `displayTitle` | Recommended | Product name — used for product-level filtering |
-| `productId` | Recommended | SKU / product ID — used to extract categories (e.g. NGA-FDI-...) |
-| `salesCategory` | Optional | Label: Regular Sales or Promo Sales |
-| `orderTotal` | Optional | Total order value including all items |
+| `productId` | Recommended | SKU — used to extract categories (e.g. NGA-FDI-...) |
+| `salesCategory` | Optional | Regular Sales or Promo Sales |
 
-> \* At least one of `final_amount` or `quantitySold` must be present depending on your forecast target.  
-> Column names are **case-sensitive** and must match exactly.  
+> \* At least one of `final_amount` or `quantitySold` is required.  
+> Column names are **case-sensitive**.  
 > Multiple files with the same columns are merged automatically.
 """)
 
 
 # ══════════════════════════════════════════════════════════════════
-# LOAD ONCE
+# SHARED UPLOAD + CONFIGURE  (separate key per page to avoid state clash)
 # ══════════════════════════════════════════════════════════════════
-model, scaler, load_err = load_model_and_scaler()
+
+def upload_and_configure(pk):
+    """
+    pk = page key string, e.g. "uf" or "fp".
+    Returns (series DataFrame, config dict) once user clicks Load,
+    or (None, None) if not ready yet.
+    """
+    with st.expander("📋  Column requirements", expanded=False):
+        show_col_guide()
+
+    st.markdown("### Step 1 — Upload CSV file(s)")
+    st.caption(
+        "You can upload **multiple files** at once (e.g. one per year). "
+        "They are merged automatically as long as they share the same column names."
+    )
+    files = st.file_uploader(
+        "Upload one or more sales CSV files",
+        type=["csv"], accept_multiple_files=True, key=f"{pk}_files"
+    )
+    if not files:
+        st.info("Waiting for file upload…")
+        return None, None
+
+    raw = read_and_merge(files)
+    if raw is None or len(raw) == 0:
+        st.error("No data found.")
+        return None, None
+
+    st.success(
+        f"✔ {len(files)} file(s) merged — {len(raw):,} rows | "
+        f"Columns: `{'`, `'.join(raw.columns.tolist())}`"
+    )
+
+    # ── Step 2: Column mapping ────────────────────────────────────
+    st.markdown("### Step 2 — Map your columns")
+    cols = list(raw.columns)
+
+    def pick(label, hints, key):
+        d = next((c for c in hints if c in cols), cols[0])
+        return st.selectbox(label, cols, index=cols.index(d), key=f"{pk}_{key}")
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: date_col = pick("Date column",          ["orderDate"],     "date")
+    with c2: amt_col  = pick("Sales amount column",  ["final_amount"],  "amt")
+    with c3: qty_col  = pick("Quantity column",       ["quantitySold"],  "qty")
+    with c4: prod_col = pick("Product name column",  ["displayTitle"],  "prod")
+    pid_col = pick("Product ID column (for categories)", ["productId"], "pid")
+
+    # ── Step 3: Forecast configuration ───────────────────────────
+    st.markdown("### Step 3 — Forecast configuration")
+
+    fc1, fc2 = st.columns(2)
+    with fc1:
+        freq_label = st.selectbox(
+            "Aggregation level",
+            ["Daily", "Monthly"],
+            key=f"{pk}_agg",
+            help="Monthly is more stable and aligns with business planning cycles."
+        )
+        freq = "D" if freq_label == "Daily" else "MS"
+
+    with fc2:
+        target_label = st.selectbox(
+            "Forecast target",
+            ["Sales Amount (₦)", "Sales Quantity (units)"],
+            key=f"{pk}_tgt"
+        )
+        val_col = amt_col if "Amount" in target_label else qty_col
+        unit    = "₦" if "Amount" in target_label else "units"
+
+    # Rolling average window for chart (visual only, does not affect model)
+    if freq == "D":
+        roll_win = st.select_slider(
+            "Chart rolling average window (days — display only, does not affect model)",
+            options=[7, 15, 30], value=30, key=f"{pk}_roll"
+        )
+    else:
+        roll_win = 3  # 3-month rolling for monthly
+
+    # ── Product / category filter ─────────────────────────────────
+    st.markdown("#### Product filter")
+    cats = get_categories(raw, pid_col)
+    cat_name_to_code = {"All Products": "ALL"} | {v: k for k, v in cats.items()}
+    # Flip: display label → code
+    cat_display      = {"All Products": "ALL"} | {v: k for k, v in cats.items()}
+
+    filter_mode = st.radio(
+        "Filter by:",
+        ["All Products", "Product Category", "Specific Products (up to 10)"],
+        horizontal=True, key=f"{pk}_fmode"
+    )
+
+    cat_code      = "ALL"
+    chosen_prods  = None
+
+    if filter_mode == "Product Category":
+        cat_labels = list(cats.values())
+        if cat_labels:
+            chosen_cat_label = st.selectbox(
+                "Select category", cat_labels, key=f"{pk}_cat"
+            )
+            # cats is {display_label: code}
+            cat_code = cats[chosen_cat_label]
+        else:
+            st.warning("No categories detected — ensure productId column is correct.")
+
+    elif filter_mode == "Specific Products (up to 10)":
+        if prod_col in raw.columns:
+            all_prods = sorted(raw[prod_col].dropna().unique().tolist())
+            chosen_prods = st.multiselect(
+                "Select up to 10 products",
+                options=all_prods,
+                max_selections=10,
+                key=f"{pk}_prods",
+                help="The forecast will sum the selected products together."
+            )
+            if not chosen_prods:
+                st.info("Select at least one product to continue.")
+                return None, None
+        else:
+            st.warning(f"Column `{prod_col}` not found.")
+
+    # ── Load button ───────────────────────────────────────────────
+    if st.button("▶  Load & process data", key=f"{pk}_load", type="primary"):
+        with st.spinner("Cleaning and aggregating…"):
+            df_c = clean_df(raw, date_col, val_col, qty_col)
+            series = aggregate(
+                df_c, date_col, val_col, freq,
+                prod_col=prod_col, pid_col=pid_col,
+                cat_code=cat_code, products=chosen_prods
+            )
+
+        if series is None or len(series) == 0:
+            st.error("No data after filtering. Try a different product or category.")
+            return None, None
+
+        if len(series) < LOOK_BACK + 5:
+            st.error(
+                f"Only {len(series)} periods after filtering. Need at least {LOOK_BACK+5}. "
+                "Try Monthly aggregation, All Products, or upload more data."
+            )
+            return None, None
+
+        # Store in session with unique per-page keys
+        st.session_state[f"{pk}_s_series"]   = series
+        st.session_state[f"{pk}_s_unit"]     = unit
+        st.session_state[f"{pk}_s_freq"]     = freq
+        st.session_state[f"{pk}_s_flabel"]   = freq_label
+        st.session_state[f"{pk}_s_cat"]      = filter_mode if filter_mode != "Product Category" else chosen_cat_label if cat_labels else "All"
+        st.session_state[f"{pk}_s_target"]   = target_label
+        st.session_state[f"{pk}_s_roll"]     = roll_win
+        st.session_state[f"{pk}_s_prods"]    = chosen_prods
+
+        st.success(
+            f"✔ {len(series)} {freq_label.lower()} periods | "
+            f"{series['date'].min().date()} → {series['date'].max().date()} | "
+            f"Mean: {'₦' if unit=='₦' else ''}{series['total'].mean():,.0f} {unit if unit!='₦' else ''}"
+        )
+
+    if f"{pk}_s_series" not in st.session_state:
+        return None, None
+
+    cfg = {
+        "series":  st.session_state[f"{pk}_s_series"],
+        "unit":    st.session_state[f"{pk}_s_unit"],
+        "freq":    st.session_state[f"{pk}_s_freq"],
+        "flabel":  st.session_state[f"{pk}_s_flabel"],
+        "cat":     st.session_state[f"{pk}_s_cat"],
+        "target":  st.session_state[f"{pk}_s_target"],
+        "roll":    st.session_state[f"{pk}_s_roll"],
+        "prods":   st.session_state[f"{pk}_s_prods"],
+    }
+    return cfg["series"], cfg
+
+
+# ══════════════════════════════════════════════════════════════════
+# LOAD MODEL ONCE
+# ══════════════════════════════════════════════════════════════════
+model, base_scaler, load_err = load_model_and_scaler()
 disp_df, num_df = load_comparison_csv()
 
 
@@ -305,7 +467,7 @@ with st.sidebar:
     st.markdown("**Model status**")
     if model is not None:
         st.success("Model loaded ✓")
-        st.caption("Vanilla LSTM · 64 units · 60-day window")
+        st.caption("Vanilla LSTM · 64 units · 60-period window")
     else:
         st.error("Model not found")
         st.caption("Run lstm_forecasting.py first")
@@ -338,201 +500,49 @@ if page == "🏠 Home":
             smape_val = f"{row['sMAPE'].values[0]:.2f}%"
 
     c1, c2, c3, c4 = st.columns(4)
-    for col, label, val in zip(
-        [c1, c2, c3, c4],
-        ["Model", "Training period", "Look-back window", "Test sMAPE"],
-        ["Vanilla LSTM", "Jan 2023 – Nov 2025", "60 periods", smape_val]
+    for col, lbl, val in zip(
+        [c1,c2,c3,c4],
+        ["Model","Training period","Look-back window","Test sMAPE"],
+        ["Vanilla LSTM","Jan 2023–Nov 2025","60 periods", smape_val]
     ):
         with col:
             st.markdown(f"""<div class="metric-card">
-                <div class="metric-label">{label}</div>
+                <div class="metric-label">{lbl}</div>
                 <div class="metric-value">{val}</div>
             </div>""", unsafe_allow_html=True)
-
-    st.markdown("---")
-    st.markdown("### Accuracy scale reference")
-    st.markdown("""
-| MAPE | sMAPE | Rating |
-|---|---|---|
-| < 10% | < 10% | Excellent / Highly Accurate |
-| 10% – 20% | 10% – 25% | Good |
-| 20% – 50% | 25% – 50% | Reasonable / Fair |
-| > 50% | > 50% | Inaccurate |
-""")
 
     st.markdown("---")
     st.markdown("### Pages")
     a, b, c, d, e = st.columns(5)
     with a:
         st.markdown("**📂 Upload & Forecast**")
-        st.write("Evaluate the model against actual historical data. Supports product category filtering, daily or monthly aggregation, and sales amount or quantity targets.")
+        st.write("Evaluate the model against historical data. Filter by category or specific products, choose daily/monthly, and select sales amount or quantity.")
     with b:
         st.markdown("**🔮 Future Predictions**")
-        st.write("Generate forward forecasts for a custom date range or number of periods. Select product category, aggregation level, and forecast target.")
+        st.write("Generate forward forecasts for a custom date range or number of periods, with the same filtering and aggregation options.")
     with c:
         st.markdown("**✅ Forecast vs Actual**")
-        st.write("Upload a forecast file and actual data file. The app compares them side by side with MAPE, sMAPE, and an accuracy rating per product/period.")
+        st.write("Upload a forecast file and actual data. The app compares them with MAPE, sMAPE, and an accuracy rating per period.")
     with d:
         st.markdown("**📊 Training Results**")
-        st.write("All four training graphs from the original model run with plain-language explanations.")
+        st.write("All four original training graphs with plain-language explanations.")
     with e:
         st.markdown("**ℹ️ About**")
-        st.write("Project background, model architecture, and data format guide.")
+        st.write("Project background, column guide, and model details.")
 
     if model is None:
         st.error(f"Model not loaded: {load_err}")
-        st.info("Run `python lstm_forecasting.py` then refresh this page.")
-
-
-# ══════════════════════════════════════════════════════════════════
-# SHARED UPLOAD + CONFIG WIDGET (used by Upload & Forecast and Future Predictions)
-# ══════════════════════════════════════════════════════════════════
-def upload_and_configure(page_key):
-    """
-    Renders: multi-file uploader, column mapper, aggregation level,
-    forecast target, and product/category filter.
-    Returns: (daily_series, config_dict) or (None, None) if not ready.
-    """
-    with st.expander("📋  Column requirements", expanded=False):
-        show_column_guide()
-
-    st.markdown("### Step 1 — Upload CSV file(s)")
-    st.markdown(
-        "You can upload **multiple CSV files** at once (e.g. separate year files). "
-        "They will be merged automatically provided they have the same columns."
-    )
-    files = st.file_uploader(
-        "Upload one or more sales CSV files",
-        type=["csv"],
-        accept_multiple_files=True,
-        key=f"upload_{page_key}",
-        help="Multiple files are stacked row-by-row after upload"
-    )
-    if not files:
-        st.info("Waiting for file upload…")
-        return None, None
-
-    raw = read_and_merge_files(files)
-    if raw is None or len(raw) == 0:
-        st.error("No data found in uploaded files.")
-        return None, None
-
-    st.success(f"✔ {len(files)} file(s) merged — {len(raw):,} total rows | Columns: `{'`, `'.join(raw.columns.tolist())}`")
-
-    # ── Column mapping ────────────────────────────────────────────
-    st.markdown("### Step 2 — Map your columns")
-    csv_cols = list(raw.columns)
-
-    def pick(label, hint_names, key):
-        default = next((c for c in hint_names if c in csv_cols), csv_cols[0])
-        idx = csv_cols.index(default)
-        return st.selectbox(label, csv_cols, index=idx, key=f"{page_key}_{key}")
-
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        date_col = pick("Date column", ["orderDate"], "date")
-    with c2:
-        amt_col  = pick("Sales amount column", ["final_amount"], "amt")
-    with c3:
-        qty_col  = pick("Quantity column", ["quantitySold"], "qty")
-    with c4:
-        prod_col = pick("Product name column", ["displayTitle"], "prod")
-
-    pid_col = pick("Product ID column (for categories)", ["productId"], "pid")
-
-    # ── Forecast configuration ────────────────────────────────────
-    st.markdown("### Step 3 — Forecast configuration")
-    fc1, fc2, fc3 = st.columns(3)
-    with fc1:
-        freq_label = st.selectbox(
-            "Aggregation level",
-            ["Daily", "Monthly"],
-            key=f"{page_key}_freq",
-            help="Monthly is more stable and aligns with business planning cycles."
-        )
-        freq = "D" if freq_label == "Daily" else "MS"
-
-    with fc2:
-        target_label = st.selectbox(
-            "Forecast target",
-            ["Sales Amount (₦)", "Sales Quantity (units)"],
-            key=f"{page_key}_target"
-        )
-        value_col = amt_col if "Amount" in target_label else qty_col
-        unit      = "₦" if "Amount" in target_label else "units"
-
-    with fc3:
-        # Category filter
-        cats = get_product_categories(raw, pid_col)
-        cat_options = {"All Products": "ALL"} | cats
-        cat_label = st.selectbox(
-            "Product category",
-            list(cat_options.keys()),
-            key=f"{page_key}_cat",
-            help="Filter by product category extracted from productId prefix (e.g. NGA-FDI = Food Items)."
-        )
-        cat_code = cat_options[cat_label]
-
-    # ── Build series ──────────────────────────────────────────────
-    if st.button("▶  Load & process data", key=f"{page_key}_load", type="primary"):
-        with st.spinner("Cleaning and aggregating data…"):
-            df_clean = clean_dataframe(raw, date_col, value_col, qty_col, prod_col, pid_col)
-
-            if cat_code != "ALL":
-                df_clean = filter_by_category(df_clean, pid_col, cat_code)
-                if len(df_clean) == 0:
-                    st.error(f"No rows found for category '{cat_label}'. Try a different filter.")
-                    return None, None
-
-            series = aggregate_series(df_clean, date_col, value_col, freq)
-
-            if len(series) < LOOK_BACK + 5:
-                st.error(
-                    f"Only {len(series)} periods after aggregation. "
-                    f"Need at least {LOOK_BACK + 5} to run the model. "
-                    "Try switching to Daily aggregation or uploading more data."
-                )
-                return None, None
-
-        st.session_state[f"{page_key}_series"]  = series
-        st.session_state[f"{page_key}_unit"]    = unit
-        st.session_state[f"{page_key}_freq"]    = freq
-        st.session_state[f"{page_key}_flabel"]  = freq_label
-        st.session_state[f"{page_key}_cat"]     = cat_label
-        st.session_state[f"{page_key}_target"]  = target_label
-        st.session_state[f"{page_key}_df"]      = df_clean
-        st.session_state[f"{page_key}_vcol"]    = value_col
-        st.success(
-            f"✔ {len(series)} {freq_label.lower()} periods | "
-            f"{series['date'].min().date()} → {series['date'].max().date()} | "
-            f"Mean: {unit}{'₦' if unit=='₦' else ''}{series['total'].mean():,.0f}"
-        )
-
-    if f"{page_key}_series" not in st.session_state:
-        return None, None
-
-    series = st.session_state[f"{page_key}_series"]
-    cfg = {
-        "unit":    st.session_state[f"{page_key}_unit"],
-        "freq":    st.session_state[f"{page_key}_freq"],
-        "flabel":  st.session_state[f"{page_key}_flabel"],
-        "cat":     st.session_state[f"{page_key}_cat"],
-        "target":  st.session_state[f"{page_key}_target"],
-        "df":      st.session_state[f"{page_key}_df"],
-        "vcol":    st.session_state[f"{page_key}_vcol"],
-    }
-    return series, cfg
+        st.info("Run `python lstm_forecasting.py` then refresh.")
 
 
 # ══════════════════════════════════════════════════════════════════
 # PAGE: UPLOAD & FORECAST
 # ══════════════════════════════════════════════════════════════════
-elif page == "📂 Upload & Forecast":
+if page == "📂 Upload & Forecast":
     st.title("Upload Data & Evaluate Forecast")
     st.markdown(
         "Upload historical sales data and evaluate how well the LSTM model forecasts it. "
-        "Supports filtering by product category, daily or monthly aggregation, "
-        "and sales amount or quantity as the forecast target."
+        "Filter by product category or select up to 10 specific products."
     )
 
     if model is None:
@@ -544,81 +554,94 @@ elif page == "📂 Upload & Forecast":
         st.stop()
 
     unit   = cfg["unit"]
+    freq   = cfg["freq"]
     flabel = cfg["flabel"]
+    roll   = cfg["roll"]
 
     st.markdown("---")
     st.markdown("### Step 4 — Run evaluation")
 
-    n_total = len(series)
-    t_end   = int(n_total * 0.70)
-    v_end   = int(n_total * 0.85)
+    n    = len(series)
+    t_e  = int(n * 0.70)
+    v_e  = int(n * 0.85)
 
-    # Normalise
-    sales = series["total"].values.reshape(-1, 1)
-    scaler_local = __import__("sklearn.preprocessing", fromlist=["MinMaxScaler"]).MinMaxScaler()
-    scaler_local.fit(sales[:t_end])
-    scaled = scaler_local.transform(sales)
+    sales  = series["total"].values.reshape(-1,1)
+    sc     = MinMaxScaler(); sc.fit(sales[:t_e])
+    scaled = sc.transform(sales)
 
     X_all, y_all = make_sequences(scaled, LOOK_BACK)
-    adj_t = t_end - LOOK_BACK
-    adj_v = v_end - LOOK_BACK
+    adj_t = t_e - LOOK_BACK
+    adj_v = v_e - LOOK_BACK
     X_te  = X_all[adj_v:].reshape(-1, LOOK_BACK, 1)
     y_te  = y_all[adj_v:]
 
-    with st.spinner("Running model inference…"):
-        yp_s   = model.predict(X_te, verbose=0)
-    y_pred   = scaler_local.inverse_transform(yp_s).flatten()
-    y_actual = scaler_local.inverse_transform(y_te.reshape(-1,1)).flatten()
-    dates    = series["date"].values[len(series)-len(y_pred):]
+    with st.spinner("Running model…"):
+        yp_s    = model.predict(X_te, verbose=0)
+    y_pred   = sc.inverse_transform(yp_s).flatten()
+    y_actual = sc.inverse_transform(y_te.reshape(-1,1)).flatten()
+    dates    = series["date"].values[n - len(y_pred):]
 
-    mean_val = float(series["total"].mean())
+    mean_v   = float(series["total"].mean())
     rmse_v   = float(np.sqrt(mean_squared_error(y_actual, y_pred)))
     mae_v    = float(mean_absolute_error(y_actual, y_pred))
-    smape_v  = calc_smape(y_actual, y_pred)
-    mape_v, n_mape = calc_mape(y_actual, y_pred, mean_val)
-    acc_label, acc_cls = accuracy_label(smape_v)
+    sm_v     = calc_smape(y_actual, y_pred)
+    mp_v, nm = calc_mape(y_actual, y_pred, mean_v)
+    lbl, cls = accuracy_label(sm_v)
 
     st.markdown("### Results")
+
+    # ── Metrics ───────────────────────────────────────────────────
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("RMSE",   f"{unit}{rmse_v:,.0f}")
-    m2.metric("MAE",    f"{unit}{mae_v:,.0f}")
-    m3.metric("sMAPE",  f"{smape_v:.2f}%")
-    m4.metric("MAPE",   f"{mape_v:.2f}%" if not np.isnan(mape_v) else "N/A")
-    m5.metric("Rating", acc_label)
+    m1.metric("RMSE",   f"{'₦' if unit=='₦' else ''}{rmse_v:,.0f}{'' if unit=='₦' else ' '+unit}")
+    m2.metric("MAE",    f"{'₦' if unit=='₦' else ''}{mae_v:,.0f}{'' if unit=='₦' else ' '+unit}")
+    m3.metric("sMAPE",  f"{sm_v:.2f}%")
+    m4.metric("MAPE",   f"{mp_v:.2f}%" if not np.isnan(mp_v) else "N/A")
+    m5.metric("Rating", lbl)
 
     st.markdown(
         f'<div class="explain-box">'
-        f"<strong>Accuracy rating: <span class='{acc_cls}'>{acc_label}</span></strong><br><br>"
-        f"<strong>RMSE ({unit}{rmse_v:,.0f}):</strong> Average prediction error penalising large misses more heavily. "
-        f"This is {rmse_v/mean_val*100:.1f}% of the mean {flabel.lower()} {cfg['target'].lower()}.<br><br>"
-        f"<strong>MAE ({unit}{mae_v:,.0f}):</strong> Average absolute error per {flabel.lower()} period ({mae_v/mean_val*100:.1f}% of mean).<br><br>"
-        f"<strong>sMAPE ({smape_v:.2f}%):</strong> Primary percentage metric. Bounded 0–200%, robust to near-zero values. "
-        f"Rated <em>{acc_label}</em> on the accuracy scale.<br><br>"
-        f"<strong>MAPE ({mape_v:.2f}%):</strong> Evaluated on {n_mape}/{len(y_pred)} periods "
-        f"(excluded near-zero periods to avoid division errors)."
+        f"<strong>Accuracy rating: <span class='{cls}'>{lbl}</span></strong><br><br>"
+        f"<strong>RMSE</strong> measures error with larger mistakes penalised more. "
+        f"At {'₦' if unit=='₦' else ''}{rmse_v:,.0f}, this is {rmse_v/mean_v*100:.1f}% of the mean {flabel.lower()} value.<br><br>"
+        f"<strong>MAE</strong> is the average absolute error per period — "
+        f"{'₦' if unit=='₦' else ''}{mae_v:,.0f} ({mae_v/mean_v*100:.1f}% of mean).<br><br>"
+        f"<strong>sMAPE ({sm_v:.2f}%)</strong> is the primary percentage metric. Rated "
+        f"<em>{lbl}</em> on the scale below.<br><br>"
+        f"<strong>MAPE ({mp_v:.2f}%)</strong> evaluated on {nm}/{len(y_pred)} periods "
+        f"(near-zero periods excluded to prevent division errors)."
         f"</div>",
-        unsafe_allow_html=True,
+        unsafe_allow_html=True
     )
+    acc_scale_table()
 
-    # Plot 1: full series
-    st.markdown("#### Full series — daily/monthly sales")
-    fig1, ax1 = plt.subplots(figsize=(14, 4))
-    ax1.plot(series["date"], series["total"], color="#1565C0", linewidth=0.8, alpha=0.8)
-    roll = series["total"].rolling(window=6 if cfg["freq"]=="MS" else 30, min_periods=1).mean()
-    ax1.plot(series["date"], roll, color="#E53935", linewidth=1.5, label="Rolling average")
+    # ── Graph 1: full series ──────────────────────────────────────
+    st.markdown("#### Full series — historical data")
+    fig1, ax1 = plt.subplots(figsize=(14,4))
+    ax1.plot(series["date"], series["total"], color="#1565C0", linewidth=0.8, alpha=0.8, label="Sales")
+    roll_series = series["total"].rolling(window=roll, min_periods=1).mean()
+    ax1.plot(series["date"], roll_series, color="#E53935", linewidth=1.5,
+             label=f"{roll}-period rolling avg")
     ax1.set_title(f"{flabel} {cfg['target']} — {cfg['cat']}", fontsize=12, fontweight="bold")
     ax1.set_ylabel(f"{cfg['target']} ({unit})")
     ax1.legend(); ax1.grid(True, alpha=0.3)
     plt.tight_layout(); st.pyplot(fig1); plt.close()
 
-    # Plot 2: forecast vs actual
+    st.markdown(
+        '<div class="explain-box">'
+        "<strong>Reading this chart:</strong> The blue line is the raw daily or monthly total. "
+        "The red line is the rolling average which smooths out short-term spikes to reveal the "
+        "underlying demand trend. Wide swings are typical of B2B bulk ordering."
+        "</div>", unsafe_allow_html=True
+    )
+
+    # ── Graph 2: forecast vs actual ───────────────────────────────
     st.markdown("#### Forecast vs Actual (test period)")
-    fig2, ax2 = plt.subplots(figsize=(14, 5))
+    fig2, ax2 = plt.subplots(figsize=(14,5))
     ax2.plot(pd.to_datetime(dates), y_actual, color="#1565C0", linewidth=1.0, label="Actual")
     ax2.plot(pd.to_datetime(dates), y_pred,   color="#E53935", linewidth=1.2,
              linestyle="--", label="LSTM Forecast")
     ax2.fill_between(pd.to_datetime(dates),
-                     np.minimum(y_actual, y_pred), np.maximum(y_actual, y_pred),
+                     np.minimum(y_actual,y_pred), np.maximum(y_actual,y_pred),
                      alpha=0.12, color="#E53935", label="Error Band")
     ax2.set_title("LSTM Forecast vs Actual", fontsize=12, fontweight="bold")
     ax2.set_ylabel(f"{cfg['target']} ({unit})")
@@ -627,62 +650,64 @@ elif page == "📂 Upload & Forecast":
 
     st.markdown(
         '<div class="explain-box">'
-        "<strong>Reading the forecast chart:</strong> The blue line is actual recorded values. "
-        "The red dashed line is the model prediction. A narrower pink error band means more "
-        "accurate predictions. The model captures the general trend but smooths out "
-        "individual-period spikes — expected for a univariate model without promotional signals."
+        "<strong>Reading this chart:</strong> Blue = actual recorded values. "
+        "Red dashed = model predictions. Narrower pink error band = more accurate. "
+        "The model captures the overall trend but smooths individual-period spikes — "
+        "expected when no promotional or external signals are in the input."
         "</div>", unsafe_allow_html=True
     )
 
-    # Plot 3: error distribution
-    st.markdown("#### Prediction error analysis")
+    # ── Graph 3: error distribution ───────────────────────────────
+    st.markdown("#### Error analysis")
     errors = y_actual - y_pred
-    fig3, ax3 = plt.subplots(1, 2, figsize=(14, 4))
+    fig3, ax3 = plt.subplots(1, 2, figsize=(14,4))
     ax3[0].bar(range(len(errors)), errors,
-               color=["#E53935" if e > 0 else "#1565C0" for e in errors], alpha=0.7)
+               color=["#E53935" if e>0 else "#1565C0" for e in errors], alpha=0.7)
     ax3[0].axhline(0, color="black", linewidth=0.8, linestyle="--")
     ax3[0].set_title("Error per Period (Actual − Predicted)", fontsize=11, fontweight="bold")
-    ax3[0].set_ylabel(f"Error ({unit})")
-    ax3[0].set_xlabel(f"{flabel} period index")
-    ax3[0].grid(True, alpha=0.3)
+    ax3[0].set_ylabel(f"Error ({unit})"); ax3[0].grid(True, alpha=0.3)
 
     ax3[1].hist(errors, bins=25, color="#7F77DD", edgecolor="white", alpha=0.85)
     ax3[1].axvline(0, color="black", linewidth=1.0, linestyle="--", label="Zero error")
     ax3[1].axvline(float(np.mean(errors)), color="#E53935", linewidth=1.2,
-                   label=f"Mean: {unit}{np.mean(errors):,.0f}")
+                   label=f"Mean error")
     ax3[1].set_title("Error Distribution", fontsize=11, fontweight="bold")
     ax3[1].set_xlabel(f"Error ({unit})"); ax3[1].set_ylabel("Periods")
     ax3[1].legend(); ax3[1].grid(True, alpha=0.3)
     plt.tight_layout(); st.pyplot(fig3); plt.close()
 
-    # Download
-    out_df = pd.DataFrame({
-        "period":     pd.to_datetime(dates).strftime("%d/%m/%Y" if cfg["freq"]=="D" else "%b %Y"),
-        "actual":     np.round(y_actual, 2),
-        "predicted":  np.round(y_pred,   2),
-        "error":      np.round(errors,    2),
-        "smape_pct":  [round(calc_smape(np.array([a]), np.array([p])), 2)
-                       for a, p in zip(y_actual, y_pred)],
-    })
-    out_df.columns = [f"period", f"actual_{unit}", f"predicted_{unit}",
-                      f"error_{unit}", "smape_pct"]
-    st.download_button(
-        "⬇  Download forecast results CSV",
-        out_df.to_csv(index=False).encode(),
-        "forecast_results.csv", "text/csv", use_container_width=True
+    st.markdown(
+        '<div class="explain-box">'
+        "<strong>Reading the error charts:</strong> "
+        "Red bars = the model under-predicted (actual was higher). "
+        "Blue bars = the model over-predicted. "
+        "The histogram shows whether errors are centred on zero (no systematic bias) "
+        "or skewed in one direction (consistent over or under-forecasting)."
+        "</div>", unsafe_allow_html=True
     )
+
+    # Download
+    out = pd.DataFrame({
+        "period":    pd.to_datetime(dates).strftime("%d/%m/%Y" if freq=="D" else "%b %Y"),
+        "actual":    np.round(y_actual,2),
+        "predicted": np.round(y_pred,2),
+        "error":     np.round(errors,2),
+        "smape_pct": [round(calc_smape(np.array([a]),np.array([p])),2)
+                      for a,p in zip(y_actual,y_pred)],
+    })
+    st.download_button("⬇  Download forecast results CSV",
+        out.to_csv(index=False).encode(),
+        "forecast_results.csv","text/csv", use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════
 # PAGE: FUTURE PREDICTIONS
 # ══════════════════════════════════════════════════════════════════
-elif page == "🔮 Future Predictions":
+if page == "🔮 Future Predictions":
     st.title("Future Sales Forecast")
     st.markdown(
-        "Upload recent sales data and generate forward-looking predictions. "
-        "Select a specific date range or number of periods, and choose "
-        "whether to forecast by product category, daily or monthly, "
-        "and for sales amount or quantity."
+        "Upload recent sales data to generate forward-looking predictions. "
+        "Select a date range or number of periods, and filter by category or specific products."
     )
 
     if model is None:
@@ -694,26 +719,25 @@ elif page == "🔮 Future Predictions":
         st.stop()
 
     unit   = cfg["unit"]
-    flabel = cfg["flabel"]
     freq   = cfg["freq"]
+    flabel = cfg["flabel"]
+    roll   = cfg["roll"]
 
     st.markdown("---")
     st.markdown("### Step 4 — Forecast horizon")
 
     hz1, hz2 = st.columns(2)
     with hz1:
-        horizon_type = st.radio(
-            "Specify forecast period by:",
-            ["Number of periods", "Date range"],
-            horizontal=True, key="fp_htype"
-        )
+        h_type = st.radio("Specify forecast period by:",
+                          ["Number of periods", "Date range"],
+                          horizontal=True, key="fp_htype")
     with hz2:
         last_date = pd.Timestamp(series["date"].iloc[-1])
-        if horizon_type == "Number of periods":
+        if h_type == "Number of periods":
             n_periods = st.number_input(
-                f"Number of {flabel.lower()} periods to forecast",
+                f"Number of {flabel.lower()} periods",
                 min_value=1, max_value=365 if freq=="D" else 36,
-                value=30 if freq=="D" else 6, key="fp_n"
+                value=30 if freq=="D" else 6, key="fp_nper"
             )
             if freq == "D":
                 future_dates = pd.date_range(
@@ -724,365 +748,301 @@ elif page == "🔮 Future Predictions":
                     start=last_date + pd.DateOffset(months=1), periods=n_periods, freq="MS"
                 )
         else:
-            col_a, col_b = st.columns(2)
-            with col_a:
-                start_date = st.date_input(
-                    "Forecast start date",
-                    value=(last_date + pd.Timedelta(days=1)).date(), key="fp_start"
-                )
-            with col_b:
-                end_date = st.date_input(
-                    "Forecast end date",
-                    value=(last_date + pd.Timedelta(days=30)).date(), key="fp_end"
-                )
+            ca, cb = st.columns(2)
+            with ca:
+                s_date = st.date_input("Start date",
+                    value=(last_date + pd.Timedelta(days=1)).date(), key="fp_sdate")
+            with cb:
+                e_date = st.date_input("End date",
+                    value=(last_date + pd.Timedelta(days=30)).date(), key="fp_edate")
             future_dates = pd.date_range(
-                start=start_date, end=end_date,
-                freq="D" if freq=="D" else "MS"
+                start=s_date, end=e_date, freq="D" if freq=="D" else "MS"
             )
             n_periods = len(future_dates)
 
     if n_periods == 0:
-        st.warning("No forecast periods selected. Adjust your date range.")
+        st.warning("No periods selected. Adjust your date range.")
         st.stop()
 
-    if st.button("▶  Generate forecast", type="primary", key="fp_run", use_container_width=True):
-        seed = series["total"].values
+    if not st.button("▶  Generate forecast", type="primary",
+                     key="fp_run", use_container_width=True):
+        st.stop()
 
-        # Fit local scaler on full series (we don't have a train/test split here)
-        from sklearn.preprocessing import MinMaxScaler as MMS
-        sc = MMS(); sc.fit(seed.reshape(-1,1))
+    # Fit local scaler on the full series (no train/test split for future)
+    seed = series["total"].values
+    sc   = MinMaxScaler(); sc.fit(seed.reshape(-1,1))
 
-        with st.spinner(f"Forecasting {n_periods} {flabel.lower()} periods…"):
-            preds = rolling_forecast(model, sc, seed, n_periods)
+    with st.spinner(f"Forecasting {n_periods} {flabel.lower()} period(s)…"):
+        preds = rolling_forecast(model, sc, seed, n_periods)
 
-        fdf = pd.DataFrame({"date": future_dates[:len(preds)], "forecast": np.round(preds[:len(future_dates)], 2)})
+    fdf = pd.DataFrame({
+        "date":     future_dates[:len(preds)],
+        "forecast": np.round(preds[:len(future_dates)],2)
+    })
 
-        st.markdown("---")
-        st.markdown("### Forecast results")
-        c1, c2, c3 = st.columns(3)
-        c1.metric(f"Total ({flabel.lower()})", f"{unit}{preds.sum():,.0f}")
-        c2.metric("Average per period",         f"{unit}{preds.mean():,.0f}")
-        c3.metric("Peak period",                f"{unit}{preds.max():,.0f}")
+    st.markdown("---")
+    st.markdown("### Forecast results")
+    c1, c2, c3 = st.columns(3)
+    c1.metric(f"Total ({flabel.lower()})", f"{'₦' if unit=='₦' else ''}{preds.sum():,.0f}")
+    c2.metric("Average per period",         f"{'₦' if unit=='₦' else ''}{preds.mean():,.0f}")
+    c3.metric("Peak period",                f"{'₦' if unit=='₦' else ''}{preds.max():,.0f}")
 
-        # Chart: history + forecast
-        fig, ax = plt.subplots(figsize=(14, 5))
-        hist_show = series.tail(12 if freq=="MS" else 90)
-        ax.plot(hist_show["date"], hist_show["total"],
-                color="#1565C0", linewidth=1.0, label="Historical", alpha=0.8)
-        ax.plot(fdf["date"], fdf["forecast"],
-                color="#E53935", linewidth=2.0, linestyle="--",
-                marker="o", markersize=4, label=f"{n_periods}-period Forecast")
-        if len(future_dates) > 0:
-            ax.axvspan(future_dates[0], future_dates[-1], alpha=0.06, color="#E53935")
-        ax.axvline(last_date, color="gray", linewidth=1.0, linestyle=":", label="Forecast start")
-        ax.set_title(
-            f"LSTM {n_periods}-{flabel} Forecast — {cfg['cat']} — {cfg['target']}",
-            fontsize=12, fontweight="bold"
-        )
-        ax.set_ylabel(f"{cfg['target']} ({unit})")
-        ax.legend(); ax.grid(True, alpha=0.3)
-        plt.tight_layout(); st.pyplot(fig); plt.close()
+    # Chart: history + forecast
+    fig, ax = plt.subplots(figsize=(14,5))
+    hist = series.tail(12 if freq=="MS" else 90)
+    ax.plot(hist["date"], hist["total"],
+            color="#1565C0", linewidth=1.0, label="Historical", alpha=0.8)
+    roll_h = hist["total"].rolling(window=roll, min_periods=1).mean()
+    ax.plot(hist["date"], roll_h,
+            color="#90CAF9", linewidth=1.2, linestyle=":",
+            label=f"{roll}-period rolling avg")
+    ax.plot(fdf["date"], fdf["forecast"],
+            color="#E53935", linewidth=2.0, linestyle="--",
+            marker="o", markersize=4, label=f"Forecast ({n_periods} periods)")
+    if len(future_dates) > 0:
+        ax.axvspan(future_dates[0], future_dates[-1], alpha=0.06, color="#E53935")
+    ax.axvline(last_date, color="gray", linewidth=1.0, linestyle=":", label="Forecast start")
+    ax.set_title(
+        f"LSTM {n_periods}-period Forecast — {cfg['cat']} — {cfg['target']}",
+        fontsize=12, fontweight="bold"
+    )
+    ax.set_ylabel(f"{cfg['target']} ({unit})")
+    ax.legend(); ax.grid(True, alpha=0.3)
+    plt.tight_layout(); st.pyplot(fig); plt.close()
 
-        # Bar breakdown
-        fig2, ax2 = plt.subplots(figsize=(12, 4))
-        ax2.bar(
-            fdf["date"].dt.strftime("%b %Y" if freq=="MS" else "%d %b"),
-            fdf["forecast"], color="#7F77DD", edgecolor="white"
-        )
-        ax2.set_title(f"Forecast Breakdown per {flabel} Period", fontsize=11, fontweight="bold")
-        ax2.set_ylabel(f"{cfg['target']} ({unit})")
-        plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha="right")
-        ax2.grid(True, alpha=0.3, axis="y")
-        plt.tight_layout(); st.pyplot(fig2); plt.close()
+    # Bar breakdown
+    fig2, ax2 = plt.subplots(figsize=(max(12, n_periods//2), 4))
+    fmt = "%b %Y" if freq=="MS" else "%d %b"
+    ax2.bar(fdf["date"].dt.strftime(fmt), fdf["forecast"],
+            color="#7F77DD", edgecolor="white")
+    ax2.set_title(f"Forecast Breakdown — {flabel} Periods", fontsize=11, fontweight="bold")
+    ax2.set_ylabel(f"{cfg['target']} ({unit})")
+    plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha="right")
+    ax2.grid(True, alpha=0.3, axis="y")
+    plt.tight_layout(); st.pyplot(fig2); plt.close()
 
-        st.markdown(
-            '<div class="explain-box">'
-            "<strong>How to read this forecast:</strong> The blue line shows recent actual sales. "
-            "The dotted grey line marks where history ends. "
-            "The red dashed line and the bar chart show predicted values for each future period. "
-            "<em>Uncertainty increases the further ahead the forecast extends</em> — "
-            "treat later periods as directional estimates rather than precise targets."
-            "</div>", unsafe_allow_html=True
-        )
+    st.markdown(
+        '<div class="explain-box">'
+        "<strong>How to read this forecast:</strong> "
+        "Blue = recent actual sales. Grey dotted = rolling average trend. "
+        "The dotted grey vertical line marks where history ends. "
+        "Red dashed + bar chart = predicted values for each future period. "
+        "<em>Uncertainty increases further into the future</em> — "
+        "treat later periods as directional estimates, not precise targets."
+        "</div>", unsafe_allow_html=True
+    )
 
-        # Table
-        show = fdf.copy()
-        fmt = "%b %Y" if freq=="MS" else "%A, %d %b %Y"
-        show["date"]     = show["date"].dt.strftime(fmt)
-        show["forecast"] = show["forecast"].apply(lambda v: f"{unit}{v:,.0f}")
-        show.columns     = ["Period", f"Forecast ({unit})"]
-        st.dataframe(show, use_container_width=True, hide_index=True)
+    # Table
+    show = fdf.copy()
+    show["date"]     = show["date"].dt.strftime("%b %Y" if freq=="MS" else "%A, %d %b %Y")
+    show["forecast"] = show["forecast"].apply(
+        lambda v: f"{'₦' if unit=='₦' else ''}{v:,.0f}{'' if unit=='₦' else ' '+unit}"
+    )
+    show.columns = ["Period", f"Forecast ({unit})"]
+    st.dataframe(show, use_container_width=True, hide_index=True)
 
-        # Download raw forecast for use in Forecast vs Actual page
-        dl = fdf.copy()
-        dl["date"] = dl["date"].dt.strftime("%d/%m/%Y")
-        dl.columns = ["date", f"forecast_{unit}"]
-        st.download_button(
-            "⬇  Download forecast CSV  (use this file in Forecast vs Actual)",
-            dl.to_csv(index=False).encode(),
-            f"forecast_{n_periods}{freq}.csv", "text/csv",
-            use_container_width=True
-        )
+    dl = fdf.copy()
+    dl["date"] = dl["date"].dt.strftime("%d/%m/%Y")
+    dl.columns = ["date", f"forecast_{unit}"]
+    st.download_button(
+        "⬇  Download forecast CSV  (use on Forecast vs Actual page)",
+        dl.to_csv(index=False).encode(),
+        f"forecast_{n_periods}{freq}.csv","text/csv", use_container_width=True
+    )
 
 
 # ══════════════════════════════════════════════════════════════════
-# PAGE: FORECAST VS ACTUAL COMPARISON
+# PAGE: FORECAST vs ACTUAL
 # ══════════════════════════════════════════════════════════════════
-elif page == "✅ Forecast vs Actual":
+if page == "✅ Forecast vs Actual":
     st.title("Forecast vs Actual Comparison")
     st.markdown(
-        "Upload the forecast file (generated on the Future Predictions page) "
-        "and a file containing the actual sales data for the same period. "
-        "The app aligns them by date, calculates accuracy metrics, "
-        "and rates the forecast using the accuracy scale."
+        "Upload the forecast file (from Future Predictions) and the actual sales data "
+        "for the same period. The app aligns by date, computes accuracy metrics, "
+        "and rates each period using the accuracy scale."
     )
 
     st.markdown("---")
-    st.markdown("### Accuracy scale reference")
-    st.markdown("""
-| MAPE | sMAPE | Rating |
-|---|---|---|
-| < 10% | < 10% | Excellent / Highly Accurate |
-| 10% – 20% | 10% – 25% | Good |
-| 20% – 50% | 25% – 50% | Reasonable / Fair |
-| > 50% | > 50% | Inaccurate |
-""")
-
-    st.markdown("---")
-    st.markdown("### Step 1 — Upload your files")
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown("**Forecast file** (from Future Predictions page)")
-        fc_file = st.file_uploader(
-            "Upload forecast CSV", type=["csv"], key="fva_fc",
-            help="Must have a date column and a forecast column"
-        )
+        st.markdown("**Forecast file** (downloaded from Future Predictions page)")
+        fc_file = st.file_uploader("Upload forecast CSV", type=["csv"], key="fva_fc")
     with col2:
         st.markdown("**Actual sales file(s)**")
-        act_files = st.file_uploader(
-            "Upload actual data CSV(s)", type=["csv"],
-            accept_multiple_files=True, key="fva_act",
-            help="Same format as your main sales data. Multiple files are merged."
-        )
+        act_files = st.file_uploader("Upload actual data CSV(s)", type=["csv"],
+                                     accept_multiple_files=True, key="fva_act")
 
     if not fc_file or not act_files:
         st.info("Upload both files to continue.")
         st.stop()
 
-    # ── Configuration ─────────────────────────────────────────────
-    st.markdown("### Step 2 — Configure columns")
-    fc_df = pd.read_csv(fc_file)
-    fc_df.columns = fc_df.columns.str.strip()
-
-    act_raw = read_and_merge_files(act_files)
-    act_raw.columns = act_raw.columns.str.strip()
-
+    st.markdown("### Step 2 — Configure")
+    fc_df    = pd.read_csv(fc_file); fc_df.columns = fc_df.columns.str.strip()
+    act_raw  = read_and_merge(act_files)
     fc_cols  = list(fc_df.columns)
     act_cols = list(act_raw.columns)
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        fc_date_col = st.selectbox("Forecast: date column", fc_cols,
-                                   index=fc_cols.index("date") if "date" in fc_cols else 0,
-                                   key="fva_fcdate")
+        fc_date = st.selectbox("Forecast: date column", fc_cols,
+            index=fc_cols.index("date") if "date" in fc_cols else 0, key="fva_fcdate")
     with c2:
-        fc_val_col  = st.selectbox("Forecast: value column", fc_cols,
-                                   index=1 if len(fc_cols) > 1 else 0, key="fva_fcval")
+        fc_val  = st.selectbox("Forecast: value column", fc_cols,
+            index=1 if len(fc_cols)>1 else 0, key="fva_fcval")
     with c3:
-        act_date_col = st.selectbox("Actual: date column", act_cols,
-                                    index=act_cols.index("orderDate") if "orderDate" in act_cols else 0,
-                                    key="fva_actdate")
+        act_date = st.selectbox("Actual: date column", act_cols,
+            index=act_cols.index("orderDate") if "orderDate" in act_cols else 0,
+            key="fva_actdate")
     with c4:
-        act_val_col  = st.selectbox("Actual: value column", act_cols,
-                                    index=act_cols.index("final_amount") if "final_amount" in act_cols else 0,
-                                    key="fva_actval")
+        act_val  = st.selectbox("Actual: value column", act_cols,
+            index=act_cols.index("final_amount") if "final_amount" in act_cols else 0,
+            key="fva_actval")
 
-    c5, c6, c7 = st.columns(3)
+    c5, c6 = st.columns(2)
     with c5:
-        freq_fva = st.selectbox("Aggregation", ["Daily", "Monthly"], key="fva_freq")
-        freq_code = "D" if freq_fva == "Daily" else "MS"
-        unit_fva  = "₦"
+        fva_freq  = st.selectbox("Aggregation", ["Daily","Monthly"], key="fva_freq")
+        fva_fcode = "D" if fva_freq=="Daily" else "MS"
     with c6:
-        # Optional product filter
-        pid_col_act = st.selectbox(
-            "Product ID column in actual (for grouping)",
-            ["None"] + act_cols, key="fva_pid"
-        )
-    with c7:
-        prod_col_act = st.selectbox(
-            "Product name column in actual",
-            ["None"] + act_cols, key="fva_pname"
-        )
+        unit_fva  = st.selectbox("Unit label", ["₦","units"], key="fva_unit")
 
-    run_fva = st.button("▶  Compare forecast vs actual", type="primary",
-                        key="fva_run", use_container_width=True)
-    if not run_fva:
+    if not st.button("▶  Compare forecast vs actual", type="primary",
+                     key="fva_run", use_container_width=True):
         st.stop()
 
-    # ── Process ───────────────────────────────────────────────────
     with st.spinner("Processing…"):
-        # Parse forecast file
-        fc_df[fc_date_col] = pd.to_datetime(fc_df[fc_date_col], dayfirst=True, errors="coerce")
-        fc_df = fc_df.dropna(subset=[fc_date_col])
-        fc_df[fc_val_col]  = pd.to_numeric(
-            fc_df[fc_val_col].astype(str).str.replace(",","",regex=False).str.replace(unit_fva,"",regex=False),
-            errors="coerce"
+        # Forecast series
+        fc_df[fc_date] = pd.to_datetime(fc_df[fc_date], dayfirst=True, errors="coerce")
+        fc_df[fc_val]  = pd.to_numeric(
+            fc_df[fc_val].astype(str).str.replace(",","",regex=False)
+                         .str.replace("₦","",regex=False), errors="coerce"
         )
-        # Resample forecast to chosen freq
-        fc_series = (
-            fc_df.set_index(fc_date_col)[fc_val_col]
-            .resample(freq_code).sum()
+        fc_s = (
+            fc_df.dropna(subset=[fc_date])
+            .set_index(fc_date)[fc_val]
+            .resample(fva_fcode).sum()
             .reset_index()
-            .rename(columns={fc_date_col:"date", fc_val_col:"forecast"})
+            .rename(columns={fc_date:"date", fc_val:"forecast"})
         )
 
-        # Parse actual file
-        act_df = clean_dataframe(act_raw, act_date_col, act_val_col)
-        act_agg = (
-            act_df.set_index(act_date_col)[act_val_col]
-            .resample(freq_code).sum()
+        # Actual series
+        act_c = clean_df(act_raw, act_date, act_val)
+        act_s = (
+            act_c.set_index(act_date)[act_val]
+            .resample(fva_fcode).sum()
             .reset_index()
-            .rename(columns={act_date_col:"date", act_val_col:"actual"})
+            .rename(columns={act_date:"date", act_val:"actual"})
         )
 
-        # Merge on date
-        merged = pd.merge(fc_series, act_agg, on="date", how="inner")
-        merged = merged[(merged["forecast"] > 0) | (merged["actual"] > 0)]
+        merged = pd.merge(fc_s, act_s, on="date", how="inner")
+        merged = merged[(merged["forecast"]>0)|(merged["actual"]>0)]
 
-        if len(merged) == 0:
-            st.error(
-                "No overlapping dates found between forecast and actual. "
-                "Check that the date ranges match."
-            )
-            st.stop()
+    if len(merged) == 0:
+        st.error("No overlapping dates. Check that date ranges match between files.")
+        st.stop()
 
-        # Per-period metrics
-        merged["error"]    = merged["actual"] - merged["forecast"]
-        merged["abs_err"]  = merged["error"].abs()
-        merged["smape_pct"]= merged.apply(
-            lambda r: round(
-                200 * abs(r["actual"]-r["forecast"]) /
-                (abs(r["actual"])+abs(r["forecast"])+1e-8), 2
-            ), axis=1
-        )
-        merged["mape_pct"] = merged.apply(
-            lambda r: round(abs(r["actual"]-r["forecast"])/r["actual"]*100, 2)
-            if r["actual"] > 0 else np.nan, axis=1
-        )
-        merged["rating"] = merged["smape_pct"].apply(lambda v: accuracy_label(v)[0])
+    # Per-period metrics
+    merged["error"]     = merged["actual"] - merged["forecast"]
+    merged["smape_pct"] = merged.apply(
+        lambda r: round(200*abs(r["actual"]-r["forecast"])/(abs(r["actual"])+abs(r["forecast"])+1e-8),2), axis=1
+    )
+    merged["mape_pct"]  = merged.apply(
+        lambda r: round(abs(r["actual"]-r["forecast"])/r["actual"]*100,2)
+        if r["actual"]>0 else np.nan, axis=1
+    )
+    merged["rating"] = merged["smape_pct"].apply(lambda v: accuracy_label(v)[0])
 
-        # Format date for display
-        date_fmt = "%b %Y" if freq_code=="MS" else "%d/%m/%Y"
-        merged["period"] = merged["date"].dt.strftime(date_fmt)
+    date_fmt = "%b %Y" if fva_fcode=="MS" else "%d/%m/%Y"
+    merged["period"] = merged["date"].dt.strftime(date_fmt)
 
-    # ── Overall metrics ───────────────────────────────────────────
-    y_a = merged["actual"].values
-    y_f = merged["forecast"].values
-    ov_rmse  = float(np.sqrt(mean_squared_error(y_a, y_f)))
-    ov_mae   = float(mean_absolute_error(y_a, y_f))
-    ov_smape = calc_smape(y_a, y_f)
-    ov_mape, nm = calc_mape(y_a, y_f, float(np.mean(y_a)))
-    ov_label, ov_cls = accuracy_label(ov_smape)
+    # Overall
+    ya, yf = merged["actual"].values, merged["forecast"].values
+    ov_rmse  = float(np.sqrt(mean_squared_error(ya,yf)))
+    ov_mae   = float(mean_absolute_error(ya,yf))
+    ov_sm    = calc_smape(ya,yf)
+    ov_mp,nm = calc_mape(ya,yf,float(np.mean(ya)))
+    ov_lbl, ov_cls = accuracy_label(ov_sm)
 
     st.markdown("---")
     st.markdown("### Overall accuracy")
-    m1, m2, m3, m4, m5 = st.columns(5)
+    m1,m2,m3,m4,m5 = st.columns(5)
     m1.metric("RMSE",   f"{unit_fva}{ov_rmse:,.0f}")
     m2.metric("MAE",    f"{unit_fva}{ov_mae:,.0f}")
-    m3.metric("sMAPE",  f"{ov_smape:.2f}%")
-    m4.metric("MAPE",   f"{ov_mape:.2f}%" if not np.isnan(ov_mape) else "N/A")
-    m5.metric("Rating", ov_label)
+    m3.metric("sMAPE",  f"{ov_sm:.2f}%")
+    m4.metric("MAPE",   f"{ov_mp:.2f}%" if not np.isnan(ov_mp) else "N/A")
+    m5.metric("Rating", ov_lbl)
 
     st.markdown(
         f'<div class="explain-box">'
-        f"<strong>Overall accuracy: <span class='{ov_cls}'>{ov_label}</span></strong><br><br>"
-        f"Across {len(merged)} overlapping periods, the forecast had a sMAPE of {ov_smape:.2f}% "
-        f"and a MAE of {unit_fva}{ov_mae:,.0f} per period.<br>"
-        f"MAPE evaluated on {nm}/{len(merged)} periods (excluded zero-actual periods)."
+        f"<strong>Overall accuracy: <span class='{ov_cls}'>{ov_lbl}</span></strong><br>"
+        f"Across {len(merged)} overlapping periods — sMAPE {ov_sm:.2f}%, "
+        f"MAE {unit_fva}{ov_mae:,.0f} per period. "
+        f"MAPE evaluated on {nm}/{len(merged)} periods (zero-actual excluded)."
         f"</div>", unsafe_allow_html=True
     )
+    acc_scale_table()
 
-    # ── Chart ─────────────────────────────────────────────────────
+    # Chart
     st.markdown("### Forecast vs Actual chart")
-    fig, ax = plt.subplots(figsize=(14, 5))
-    ax.plot(merged["date"], merged["actual"],   color="#1565C0", linewidth=1.2, label="Actual", marker="o", markersize=4)
-    ax.plot(merged["date"], merged["forecast"], color="#E53935", linewidth=1.2, linestyle="--", label="Forecast", marker="s", markersize=4)
+    fig, ax = plt.subplots(figsize=(14,5))
+    ax.plot(merged["date"], merged["actual"],   color="#1565C0", linewidth=1.2,
+            label="Actual", marker="o", markersize=4)
+    ax.plot(merged["date"], merged["forecast"], color="#E53935", linewidth=1.2,
+            linestyle="--", label="Forecast", marker="s", markersize=4)
     ax.fill_between(merged["date"],
-                    np.minimum(merged["actual"], merged["forecast"]),
-                    np.maximum(merged["actual"], merged["forecast"]),
+                    np.minimum(merged["actual"],merged["forecast"]),
+                    np.maximum(merged["actual"],merged["forecast"]),
                     alpha=0.12, color="#E53935", label="Error Band")
-    ax.set_title("Forecast vs Actual Sales", fontsize=13, fontweight="bold")
+    ax.set_title("Forecast vs Actual", fontsize=13, fontweight="bold")
     ax.set_ylabel(f"Value ({unit_fva})")
     ax.legend(); ax.grid(True, alpha=0.3)
     plt.tight_layout(); st.pyplot(fig); plt.close()
 
-    # ── Detailed table ────────────────────────────────────────────
+    # Detailed table
     st.markdown("### Period-by-period breakdown")
-    display = merged[[
-        "period", "forecast", "actual", "error", "smape_pct", "mape_pct", "rating"
-    ]].copy()
-    display.columns = [
-        "Period",
-        f"Forecast ({unit_fva})",
-        f"Actual ({unit_fva})",
-        f"Error ({unit_fva})",
-        "sMAPE (%)",
-        "MAPE (%)",
-        "Rating"
-    ]
-    # Format numbers
-    for col in [f"Forecast ({unit_fva})", f"Actual ({unit_fva})", f"Error ({unit_fva})"]:
-        display[col] = display[col].apply(lambda v: f"{v:,.0f}")
+    disp = merged[["period","forecast","actual","error","smape_pct","mape_pct","rating"]].copy()
+    disp.columns = ["Period",f"Forecast ({unit_fva})",f"Actual ({unit_fva})",
+                    f"Error ({unit_fva})","sMAPE (%)","MAPE (%)","Rating"]
+    for c in [f"Forecast ({unit_fva})",f"Actual ({unit_fva})",f"Error ({unit_fva})"]:
+        disp[c] = disp[c].apply(lambda v: f"{v:,.0f}")
+    st.dataframe(disp, use_container_width=True, hide_index=True)
 
-    st.dataframe(display, use_container_width=True, hide_index=True)
-
-    # ── Download ──────────────────────────────────────────────────
     dl = merged[["period","forecast","actual","error","smape_pct","mape_pct","rating"]].copy()
-    dl.columns = ["period", f"forecast_{unit_fva}", f"actual_{unit_fva}",
-                  f"error_{unit_fva}", "smape_pct", "mape_pct", "rating"]
-    st.download_button(
-        "⬇  Download comparison as CSV",
+    dl.columns = ["period",f"forecast_{unit_fva}",f"actual_{unit_fva}",
+                  f"error_{unit_fva}","smape_pct","mape_pct","rating"]
+    st.download_button("⬇  Download comparison as CSV",
         dl.to_csv(index=False).encode(),
-        "forecast_vs_actual.csv", "text/csv",
-        use_container_width=True
-    )
+        "forecast_vs_actual.csv","text/csv", use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════
 # PAGE: TRAINING RESULTS
 # ══════════════════════════════════════════════════════════════════
-elif page == "📊 Training Results":
+if page == "📊 Training Results":
     st.title("Training Results")
-    st.markdown(
-        "All graphs from the original model training run. "
-        "They update automatically when `lstm_forecasting.py` is re-run."
-    )
+    st.markdown("All graphs from the original model training run. Updated automatically when `lstm_forecasting.py` is re-run.")
 
     graphs = [
-        ("01_daily_sales_timeseries.png", "Daily total sales time series",
+        ("01_daily_sales_timeseries.png","Daily total sales time series",
          "The top panel shows raw daily total sales (Jan 2023–Nov 2025). "
          "The bottom panel adds a 30-day rolling average (red) to reveal the underlying trend. "
          "Sales grew from early 2023, peaked around late 2024, and declined toward Nov 2025. "
-         "This declining tail formed the test period — the hardest scenario for the model. "
-         "High day-to-day volatility reflects irregular bulk ordering patterns typical of B2B platforms."),
-        ("02_training_loss.png", "LSTM training vs validation loss",
-         "The blue line is training loss (MSE on normalised values) per epoch. "
-         "The red line is validation loss. Both drop steeply in the first few epochs then "
-         "level off running close together with no upward divergence. "
-         "This confirms clean convergence with no overfitting. "
-         "Early stopping fired after validation loss showed no further improvement, "
+         "This declining tail formed the test period — the hardest forecasting scenario. "
+         "High volatility reflects irregular bulk ordering typical of B2B e-commerce."),
+        ("02_training_loss.png","LSTM training vs validation loss",
+         "The blue line is training loss (MSE) per epoch. The red line is validation loss. "
+         "Both drop steeply in the first few epochs then level off running close together "
+         "with no upward divergence — confirming clean convergence with no overfitting. "
+         "Early stopping fired after validation loss showed no further improvement "
          "and best weights were automatically restored."),
-        ("03_predictions_vs_actual.png", "LSTM forecast vs actual (test period)",
+        ("03_predictions_vs_actual.png","LSTM forecast vs actual (test period)",
          "Blue = actual daily sales in the held-out test period (Jun–Nov 2025). "
-         "Red dashed = LSTM predictions for those same days, generated without the model "
-         "ever seeing this period during training. "
-         "The model captures the general downward trend correctly but smooths out individual spikes — "
-         "expected for a univariate model with no access to promotional or restocking signals. "
-         "For strategic planning the trend-level accuracy is the most operationally relevant output."),
-        ("04_model_comparison.png", "Model performance metrics",
+         "Red dashed = LSTM predictions generated without the model ever seeing this period. "
+         "The model captures the general downward trend correctly but smooths individual spikes — "
+         "expected for a univariate model with no promotional signals in the input. "
+         "For strategic planning, trend-level accuracy is the most operationally relevant output."),
+        ("04_model_comparison.png","Model performance metrics",
          "Bar charts comparing RMSE, MAE, MAPE, and sMAPE across the models evaluated. "
-         "Lower bars on all metrics = better performance. "
-         "sMAPE is the primary percentage metric here because it is bounded 0–200% and not "
+         "Lower = better. sMAPE is the primary percentage metric — bounded 0–200% and not "
          "distorted by near-zero actual values on low-volume days, which inflate conventional MAPE."),
     ]
 
@@ -1096,7 +1056,7 @@ elif page == "📊 Training Results":
                 unsafe_allow_html=True
             )
         else:
-            st.warning(f"`{fname}` not found — run `python lstm_forecasting.py` to generate it.")
+            st.warning(f"`{fname}` not found — run `python lstm_forecasting.py`.")
 
     st.markdown("---")
     st.markdown("### Live metrics table")
@@ -1108,7 +1068,7 @@ elif page == "📊 Training Results":
 
     st.markdown("---")
     st.markdown("### Model configuration")
-    c1, c2 = st.columns(2)
+    c1,c2 = st.columns(2)
     with c1:
         st.markdown("""
 | Parameter | Value |
@@ -1134,37 +1094,34 @@ elif page == "📊 Training Results":
 # ══════════════════════════════════════════════════════════════════
 # PAGE: ABOUT
 # ══════════════════════════════════════════════════════════════════
-elif page == "ℹ️ About":
+if page == "ℹ️ About":
     st.title("About This Project")
     st.markdown("""
 ### Design and Development of an LSTM-Based Product Demand Forecasting System
 **Postgraduate Diploma Research** — Nigerian B2B E-Commerce (Anonymous)
 
 ---
-### Research objective
-Design, implement, and evaluate a vanilla LSTM neural network for forecasting
-daily product demand from historical transactional sales data, and deploy the
-model as an interactive web application.
+### Minimum CSV format
+```
+orderDate,final_amount
+05/01/2023,125000
+06/01/2023,340500
+```
+For quantity forecasting, add `quantitySold`.  
+For category/product filtering, add `productId` (format: `NGA-FDI-PST-000025`) and `displayTitle`.
 
 ---
-### Dataset
-| Property | Detail |
+### Product filtering options
+| Mode | How it works |
 |---|---|
-| Company | Nigerian B2B e-commerce (anonymous) |
-| Period | January 2023 – November 2025 |
-| Raw transactions | ~2.38 million rows across 5 CSV files |
-| Trading days used | 982 (after cleaning and outlier removal) |
-| Date format | DD/MM/YYYY |
-| Product categories | Food (FDI), Beverages (BEV), Home (HME), Personal/Cooking (PRF), others |
+| All Products | Aggregates total sales across every product |
+| Product Category | Filters by category prefix in productId (FDI=Food, BEV=Beverages, HME=Home, PRF=Personal/Cooking) |
+| Specific Products (up to 10) | You select individual products by name; their sales are summed |
 
----
-### Model architecture
-| Layer | Type | Detail |
-|---|---|---|
-| 1 | LSTM | 64 units, return_sequences=False |
-| 2 | Dropout | Rate = 0.2 |
-| 3 | Dense | 1 neuron, linear activation |
-| — | Total | 16,961 trainable parameters |
+> Note: The LSTM model was trained on aggregate daily total sales. Category and product filters
+> are applied before aggregation to produce a filtered series — the model then forecasts
+> the total of that filtered group. The rolling window (7/15/30 days) only affects
+> the display chart and does not change the model's predictions.
 
 ---
 ### Accuracy scale
@@ -1178,16 +1135,6 @@ model as an interactive web application.
 ---
 ### Technologies
 Python 3.11.9 · TensorFlow 2.21 · pandas · NumPy · scikit-learn · Matplotlib · Streamlit
-
----
-### Minimum CSV format required
-```
-orderDate,final_amount
-05/01/2023,125000
-06/01/2023,340500
-```
-For quantity forecasting, also include a `quantitySold` column.
-For category filtering, include `productId` (format: `NGA-FDI-PST-000025`).
 
 ---
 ### Run locally
