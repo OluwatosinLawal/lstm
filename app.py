@@ -402,14 +402,14 @@ def upload_and_configure(pk):
                 cat_code=cat_code, products=chosen_prods
             )
 
-        if series is None or len(series) == 0:
-            st.error("No data after filtering. Try a different product or category.")
-            return None, None
+        # For monthly data, use a shorter look-back (12 months minimum)
+        min_periods = 13 if freq == "MS" else LOOK_BACK + 5
 
-        if len(series) < LOOK_BACK + 5:
+        if len(series) < min_periods:
             st.error(
-                f"Only {len(series)} periods after filtering. Need at least {LOOK_BACK+5}. "
-                "Try Monthly aggregation, All Products, or upload more data."
+                f"Only {len(series)} periods after filtering. "
+                f"Need at least {min_periods} {'months' if freq=='MS' else 'days'}. "
+                "Upload more data or switch to a broader product filter."
             )
             return None, None
 
