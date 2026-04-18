@@ -214,6 +214,9 @@ def aggregate(df, date_col, val_col, freq, product_filter=None,
     series = series[series["total"] > 0].reset_index(drop=True)
     thresh = series["total"].quantile(0.01)
     series = series[series["total"] > thresh].reset_index(drop=True)
+    # Remove Sundays — the company does not trade on Sundays
+    if freq == "D":
+        series = series[series["date"].dt.weekday != 6].reset_index(drop=True)
     return series
 
 
@@ -740,9 +743,14 @@ if page == "🔮 Future Predictions":
                 value=30 if freq=="D" else 6, key="fp_nper"
             )
             if freq == "D":
-                future_dates = pd.date_range(
-                    start=last_date + pd.Timedelta(days=1), periods=n_periods, freq="D"
-                )
+                # Generate enough candidate dates then filter out Sundays
+                future_dates = []
+                current = last_date
+                while len(future_dates) < n_periods:
+                    current += pd.Timedelta(days=1)
+                    if current.weekday() != 6:   # 6 = Sunday
+                        future_dates.append(current)
+                future_dates = pd.DatetimeIndex(future_dates)
             else:
                 future_dates = pd.date_range(
                     start=last_date + pd.DateOffset(months=1), periods=n_periods, freq="MS"
@@ -755,9 +763,13 @@ if page == "🔮 Future Predictions":
             with cb:
                 e_date = st.date_input("End date",
                     value=(last_date + pd.Timedelta(days=30)).date(), key="fp_edate")
-            future_dates = pd.date_range(
-                start=s_date, end=e_date, freq="D" if freq=="D" else "MS"
-            )
+            if freq == "D":
+                # Exclude Sundays from the selected date range
+                all_dates = pd.date_range(start=s_date, end=e_date, freq="D")
+                future_dates = pd.DatetimeIndex([d for d in all_dates if d.weekday() != 6])
+            else:
+                future_dates = pd.date_range(start=s_date, end=e_date, freq="MS")
+            n_periods = len(future_dates)
             n_periods = len(future_dates)
 
     if n_periods == 0:
@@ -932,6 +944,9 @@ if page == "✅ Forecast vs Actual":
             .reset_index()
             .rename(columns={act_date:"date", act_val:"actual"})
         )
+        # Remove Sundays from daily actual series
+        if fva_fcode == "D":
+            act_s = act_s[act_s["date"].dt.weekday != 6].reset_index(drop=True)
 
         merged = pd.merge(fc_s, act_s, on="date", how="inner")
         merged = merged[(merged["forecast"]>0)|(merged["actual"]>0)]
