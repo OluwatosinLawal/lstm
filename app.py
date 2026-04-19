@@ -261,12 +261,12 @@ def aggregate(df, date_col, val_col, freq,
     )
     series = series[series["total"] > 0].reset_index(drop=True)
 
-    # Remove bottom 1% outlier days
-    thresh = series["total"].quantile(0.01)
-    series = series[series["total"] > thresh].reset_index(drop=True)
-
-    # ── Exclude Sundays from daily series ────────────────────────
+    # Remove bottom 1% outlier periods — daily only.
+    # Monthly totals are never near-zero anomalies so no removal needed.
     if freq == "D":
+        thresh = series["total"].quantile(0.01)
+        series = series[series["total"] > thresh].reset_index(drop=True)
+        # Exclude Sundays from daily series
         series = series[series["date"].dt.weekday != 6].reset_index(drop=True)
 
     return series if len(series) > 0 else None
@@ -535,14 +535,16 @@ def upload_and_configure(pk):
             return None, None
 
         lb          = get_lb(freq)
-        min_periods = lb + 3
+        # Monthly: need lb + 1 (13 months minimum for one full look-back + 1 target).
+        # Daily:   need lb + 5 to have a meaningful test split.
+        min_periods = lb + 1 if freq == "MS" else lb + 5
 
         if len(series) < min_periods:
             unit_word = "months" if freq == "MS" else "trading days"
             st.error(
                 f"Only {len(series)} {unit_word} after filtering. "
                 f"Need at least {min_periods}. "
-                "Upload more data, switch to a broader product filter, or try Monthly aggregation."
+                f"{'Upload at least 13 months of data.' if freq == 'MS' else 'Upload more data, switch to a broader product filter, or try Monthly aggregation.'}"
             )
             return None, None
 
