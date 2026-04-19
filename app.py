@@ -848,7 +848,9 @@ if page == "📂 Upload & Forecast":
 if page == "🔮 Future Predictions":
     st.title("Future Sales Forecast")
     st.markdown(
-        "Generate forward-looking predictions from recent sales data. "
+        "Generate forward-looking predictions per product or category. "
+        "When Specific Products or Product Category is selected, each item is "
+        "forecast independently and plotted on the same chart. "
         "Sundays are automatically excluded from daily forecasts."
     )
 
@@ -856,6 +858,8 @@ if page == "🔮 Future Predictions":
         st.error("Model not loaded. Run `python lstm_forecasting.py` first.")
         st.stop()
 
+    # upload_and_configure still runs — we use it for data loading / column mapping.
+    # We read the raw filtered df directly from session state after Load is clicked.
     series, cfg = upload_and_configure("fp")
     if series is None:
         st.stop()
@@ -865,6 +869,19 @@ if page == "🔮 Future Predictions":
     flabel = cfg["flabel"]
     roll   = cfg["roll"]
     lb     = get_lb(freq)
+    pfx    = "₦" if unit == "₦" else ""
+    sfx    = "" if unit == "₦" else f" {unit}"
+
+    # Determine whether we are in per-group mode (category or specific products)
+    filter_mode   = st.session_state.get("fp_fmode", "All Products")
+    chosen_prods  = cfg.get("prods")           # list of product names or None
+    cat_code      = cfg.get("catcode", "ALL")  # category code or "ALL"
+    prod_col      = cfg.get("pcol")            # product name column
+    pid_col       = cfg.get("pidcol")          # product ID column
+    val_col       = cfg.get("vcol")            # final_amount or quantitySold
+    df_clean      = cfg.get("df")              # cleaned full df from session
+
+    per_group = filter_mode in ("Specific Products (up to 10)", "Product Category")
 
     st.markdown("---")
     st.markdown("### Step 4 — Forecast horizon")
@@ -888,7 +905,6 @@ if page == "🔮 Future Predictions":
                 key="fp_nper"
             )
             future_dates = make_future_dates(last_date, int(n_periods), freq)
-
         else:
             ca, cb = st.columns(2)
             with ca:
@@ -919,91 +935,323 @@ if page == "🔮 Future Predictions":
                      key="fp_run", use_container_width=True):
         st.stop()
 
-    seed = series["total"].values
-    sc   = MinMaxScaler()
-    sc.fit(seed.reshape(-1, 1))
+    date_fmt = "%b %Y" if freq == "MS" else "%A, %d %b %Y"
+    dl_fmt   = "%d/%m/%Y"
+    bar_fmt  = "%b %Y" if freq == "MS" else "%d %b"
 
-    with st.spinner(f"Forecasting {n_periods} {flabel.lower()} period(s)…"):
-        preds = rolling_forecast(model, sc, seed, int(n_periods), lb=lb)
+    # ── COLOURS for multi-line chart ─────────────────────────────
+    PALETTE = [
+        "#E53935","#1565C0","#2E7D32","#6A1B9A","#E65100",
+        "#00838F","#AD1457","#558B2F","#4527A0","#00695C",
+    ]
 
-    fdf = pd.DataFrame({
-        "date":     future_dates[:len(preds)],
-        "forecast": np.round(preds[:len(future_dates)], 2)
-    })
+    # ══════════════════════════════════════════════════════════════
+    # PER-GROUP MODE  — forecast each product / category separately
+    # ══════════════════════════════════════════════════════════════
+    if per_group and df_clean is not None:
 
-    pfx = "₦" if unit == "₦" else ""
-    sfx = "" if unit == "₦" else f" {unit}"
+        # Determine the list of groups to iterate
+        if filter_mode == "Specific Products (up to 10)" and chosen_prods and prod_col:
+            groups      = chosen_prods
+            group_col   = prod_col
+            group_type  = "product"
 
-    st.markdown("---")
-    st.markdown("### Forecast results")
-    c1, c2, c3 = st.columns(3)
-    c1.metric(f"Total ({flabel.lower()})", f"{pfx}{preds.sum():,.0f}{sfx}")
-    c2.metric("Average per period",        f"{pfx}{preds.mean():,.0f}{sfx}")
-    c3.metric("Peak period",               f"{pfx}{preds.max():,.0f}{sfx}")
+        elif filter_mode == "Product Category" and pid_col:
+            # Build a list of category labels present in the data
+            cats_present = get_categories(df_clean, pid_col)
+            if cat_code != "ALL":
+                # Only the selected category was loaded — iterate sub-prefixes or
+                # just treat it as a single group (category-level)
+                groups     = [cfg.get("cat", cat_code)]
+                group_col  = pid_col
+                group_type = "category"
+            else:
+                groups     = list(cats_present.keys())
+                group_col  = pid_col
+                group_type = "category"
+        else:
+            groups     = []
+            group_col  = None
+            group_type = "product"
 
-    # Chart: history + forecast
-    fig, ax = plt.subplots(figsize=(14, 5))
-    hist   = series.tail(12 if freq == "MS" else 90)
-    roll_h = hist["total"].rolling(window=roll, min_periods=1).mean()
-    ax.plot(hist["date"], hist["total"],
-            color="#1565C0", linewidth=1.0, label="Historical", alpha=0.8)
-    ax.plot(hist["date"], roll_h,
-            color="#90CAF9", linewidth=1.2, linestyle=":",
-            label=f"{roll}-period rolling avg")
-    ax.plot(fdf["date"], fdf["forecast"],
-            color="#E53935", linewidth=2.0, linestyle="--",
-            marker="o", markersize=4, label=f"Forecast ({n_periods} periods)")
-    if len(future_dates) > 0:
-        ax.axvspan(future_dates[0], future_dates[-1], alpha=0.06, color="#E53935")
-    ax.axvline(last_date, color="gray", linewidth=1.0, linestyle=":", label="Forecast start")
-    ax.set_title(
-        f"LSTM {n_periods}-period Forecast — {cfg['cat']} — {cfg['target']}",
-        fontsize=12, fontweight="bold"
-    )
-    ax.set_ylabel(f"{cfg['target']} ({unit})")
-    ax.legend(); ax.grid(True, alpha=0.3)
-    plt.tight_layout(); st.pyplot(fig); plt.close()
+        if not groups:
+            st.warning("No groups found to forecast individually. Check your filter selection.")
+            st.stop()
 
-    # Bar chart
-    bar_w  = max(12, n_periods // 2)
-    fig2, ax2 = plt.subplots(figsize=(bar_w, 4))
-    fmt = "%b %Y" if freq == "MS" else "%d %b"
-    ax2.bar(fdf["date"].dt.strftime(fmt), fdf["forecast"],
-            color="#7F77DD", edgecolor="white")
-    ax2.set_title(f"Forecast Breakdown — {flabel} Periods", fontsize=11, fontweight="bold")
-    ax2.set_ylabel(f"{cfg['target']} ({unit})")
-    plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha="right")
-    ax2.grid(True, alpha=0.3, axis="y")
-    plt.tight_layout(); st.pyplot(fig2); plt.close()
+        # ── Run model for each group ──────────────────────────────
+        all_results = {}   # group_name -> DataFrame(date, forecast)
 
-    st.markdown(
-        '<div class="explain-box">'
-        "<strong>How to read this forecast:</strong> "
-        "Blue = recent actual sales. Grey dotted = rolling average trend. "
-        "The vertical dotted line marks where history ends. "
-        "Red dashed + bars = predicted values. "
-        "<em>Uncertainty grows further into the future</em> — "
-        "later periods are directional estimates, not precise targets."
-        "</div>", unsafe_allow_html=True
-    )
+        progress = st.progress(0, text="Forecasting groups…")
+        for i, grp in enumerate(groups):
+            progress.progress(
+                int((i / len(groups)) * 100),
+                text=f"Forecasting: {grp[:40]}…"
+            )
 
-    # Table
-    show = fdf.copy()
-    show["date"]     = show["date"].dt.strftime("%b %Y" if freq == "MS" else "%A, %d %b %Y")
-    show["forecast"] = show["forecast"].apply(lambda v: f"{pfx}{v:,.0f}{sfx}")
-    show.columns     = ["Period", f"Forecast ({unit})"]
-    st.dataframe(show, use_container_width=True, hide_index=True)
+            # Build this group's series
+            if group_type == "product" and prod_col:
+                grp_df = df_clean[df_clean[prod_col] == grp]
+            else:
+                # category: match by productId prefix
+                grp_code = get_categories(df_clean, pid_col).get(grp, cat_code)
+                grp_df   = df_clean[
+                    df_clean[pid_col].astype(str)
+                    .str.contains(f"NGA-{grp_code}-", na=False)
+                ] if pid_col and pid_col in df_clean.columns else df_clean
 
-    # Download
-    dl = fdf.copy()
-    dl["date"] = dl["date"].dt.strftime("%d/%m/%Y")
-    dl.columns = ["date", f"forecast_{unit}"]
-    st.download_button(
-        "⬇  Download forecast CSV  (use this on the Forecast vs Actual page)",
-        dl.to_csv(index=False).encode(),
-        f"forecast_{n_periods}{freq}.csv", "text/csv",
-        use_container_width=True
-    )
+            date_col_name = cfg.get("date", "orderDate")
+            # Identify actual date column name in df_clean
+            dc = next(
+                (c for c in df_clean.columns
+                 if c.lower() in ("orderdate","date")), df_clean.columns[0]
+            )
+
+            grp_series = aggregate(grp_df, dc, val_col, freq)
+
+            if grp_series is None or len(grp_series) < lb + 1:
+                st.warning(
+                    f"Skipping '{grp}' — only {len(grp_series) if grp_series is not None else 0} "
+                    f"periods of data (need at least {lb + 1})."
+                )
+                continue
+
+            seed = grp_series["total"].values
+            sc   = MinMaxScaler()
+            sc.fit(seed.reshape(-1, 1))
+            preds = rolling_forecast(model, sc, seed, int(n_periods), lb=lb)
+
+            all_results[grp] = pd.DataFrame({
+                "date":     future_dates[:len(preds)],
+                "forecast": np.round(preds[:len(future_dates)], 2),
+            })
+
+        progress.progress(100, text="Done!")
+
+        if not all_results:
+            st.error("No groups had enough data to forecast. Upload more data or use All Products.")
+            st.stop()
+
+        # ── Summary metrics ───────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### Forecast results")
+
+        all_totals = {g: df["forecast"].sum() for g, df in all_results.items()}
+        grand_total = sum(all_totals.values())
+
+        st.markdown(f"**Grand total across all {group_type}s — {n_periods} {flabel.lower()} "
+                    f"period(s):** {pfx}{grand_total:,.0f}{sfx}")
+
+        # Summary cards — one per group
+        cols = st.columns(min(len(all_results), 4))
+        for idx, (grp, fdf) in enumerate(all_results.items()):
+            with cols[idx % len(cols)]:
+                st.markdown(
+                    f'<div class="metric-card">'
+                    f'<div class="metric-label">{grp[:30]}</div>'
+                    f'<div class="metric-value">{pfx}{fdf["forecast"].sum():,.0f}{sfx}</div>'
+                    f'<div class="metric-label">avg {pfx}{fdf["forecast"].mean():,.0f}{sfx}/period</div>'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+
+        # ── Graph 1: Multi-line forecast per group ────────────────
+        st.markdown("#### Forecast per group — line chart")
+        fig, ax = plt.subplots(figsize=(14, 6))
+
+        for idx, (grp, fdf) in enumerate(all_results.items()):
+            colour = PALETTE[idx % len(PALETTE)]
+            ax.plot(
+                fdf["date"], fdf["forecast"],
+                color=colour, linewidth=1.8, linestyle="--",
+                marker="o", markersize=3,
+                label=grp[:35]
+            )
+
+        if len(future_dates) > 0:
+            ax.axvspan(future_dates[0], future_dates[-1], alpha=0.04, color="gray")
+        ax.axvline(last_date, color="gray", linewidth=1.0, linestyle=":", label="Forecast start")
+        ax.set_title(
+            f"LSTM {n_periods}-period Forecast by {group_type.title()} — {cfg['target']}",
+            fontsize=12, fontweight="bold"
+        )
+        ax.set_ylabel(f"{cfg['target']} ({unit})")
+        ax.legend(loc="upper left", fontsize=8, ncol=2)
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        st.pyplot(fig)
+        plt.close()
+
+        st.markdown(
+            '<div class="explain-box">'
+            f"<strong>Reading this chart:</strong> Each coloured dashed line represents one "
+            f"{group_type}'s independently forecast sales. "
+            "Lines that climb steeply indicate the model detecting an upward trend in that "
+            f"{group_type}'s recent history. Lines that flatten indicate stable or declining demand. "
+            "<em>Uncertainty grows further into the future</em> — "
+            "treat later periods as directional estimates."
+            "</div>", unsafe_allow_html=True
+        )
+
+        # ── Graph 2: Stacked bar chart ────────────────────────────
+        st.markdown("#### Total forecast per period — stacked bar chart")
+        # Build a wide DataFrame: index = date, columns = groups
+        bar_df = pd.DataFrame({"date": future_dates[:int(n_periods)]})
+        for grp, fdf in all_results.items():
+            bar_df = bar_df.merge(
+                fdf.rename(columns={"forecast": grp}),
+                on="date", how="left"
+            ).fillna(0)
+
+        bar_labels = bar_df["date"].dt.strftime(bar_fmt)
+        bar_w      = max(14, n_periods // 2)
+        fig2, ax2  = plt.subplots(figsize=(bar_w, 5))
+        bottom     = np.zeros(len(bar_df))
+
+        for idx, grp in enumerate(all_results.keys()):
+            if grp in bar_df.columns:
+                vals = bar_df[grp].values
+                ax2.bar(bar_labels, vals, bottom=bottom,
+                        color=PALETTE[idx % len(PALETTE)],
+                        edgecolor="white", linewidth=0.4,
+                        label=grp[:30])
+                bottom += vals
+
+        ax2.set_title(
+            f"Stacked Forecast — {flabel} Periods — all {group_type}s",
+            fontsize=11, fontweight="bold"
+        )
+        ax2.set_ylabel(f"{cfg['target']} ({unit})")
+        plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha="right")
+        ax2.legend(loc="upper left", fontsize=8, ncol=2)
+        ax2.grid(True, alpha=0.3, axis="y")
+        plt.tight_layout()
+        st.pyplot(fig2)
+        plt.close()
+
+        st.markdown(
+            '<div class="explain-box">'
+            "<strong>Reading the stacked bar chart:</strong> Each bar represents one forecast period. "
+            "The coloured segments within each bar show each product or category's share of "
+            "total predicted demand. Taller bars = higher total predicted sales for that period."
+            "</div>", unsafe_allow_html=True
+        )
+
+        # ── Table: period × group ─────────────────────────────────
+        st.markdown("#### Forecast table — per group per period")
+        tbl_rows = []
+        for grp, fdf in all_results.items():
+            for _, row in fdf.iterrows():
+                tbl_rows.append({
+                    "Product / Category": grp,
+                    "Period": row["date"].strftime(date_fmt),
+                    f"Forecast ({unit})": f"{pfx}{row['forecast']:,.0f}{sfx}",
+                })
+        tbl_df = pd.DataFrame(tbl_rows)
+        st.dataframe(tbl_df, use_container_width=True, hide_index=True)
+
+        # ── Download ──────────────────────────────────────────────
+        dl_rows = []
+        for grp, fdf in all_results.items():
+            for _, row in fdf.iterrows():
+                dl_rows.append({
+                    "group":            grp,
+                    "date":             row["date"].strftime(dl_fmt),
+                    f"forecast_{unit}": round(row["forecast"], 2),
+                })
+        dl_df = pd.DataFrame(dl_rows)
+        st.download_button(
+            "⬇  Download per-group forecast CSV",
+            dl_df.to_csv(index=False).encode(),
+            f"forecast_by_{group_type}_{n_periods}{freq}.csv",
+            "text/csv", use_container_width=True
+        )
+
+    # ══════════════════════════════════════════════════════════════
+    # ALL-PRODUCTS MODE  — single combined series (original behaviour)
+    # ══════════════════════════════════════════════════════════════
+    else:
+        seed = series["total"].values
+        sc   = MinMaxScaler()
+        sc.fit(seed.reshape(-1, 1))
+
+        with st.spinner(f"Forecasting {n_periods} {flabel.lower()} period(s)…"):
+            preds = rolling_forecast(model, sc, seed, int(n_periods), lb=lb)
+
+        fdf = pd.DataFrame({
+            "date":     future_dates[:len(preds)],
+            "forecast": np.round(preds[:len(future_dates)], 2)
+        })
+
+        st.markdown("---")
+        st.markdown("### Forecast results")
+        c1, c2, c3 = st.columns(3)
+        c1.metric(f"Total ({flabel.lower()})", f"{pfx}{preds.sum():,.0f}{sfx}")
+        c2.metric("Average per period",        f"{pfx}{preds.mean():,.0f}{sfx}")
+        c3.metric("Peak period",               f"{pfx}{preds.max():,.0f}{sfx}")
+
+        # History + forecast line chart
+        fig, ax = plt.subplots(figsize=(14, 5))
+        hist   = series.tail(12 if freq == "MS" else 90)
+        roll_h = hist["total"].rolling(window=roll, min_periods=1).mean()
+        ax.plot(hist["date"], hist["total"],
+                color="#1565C0", linewidth=1.0, label="Historical", alpha=0.8)
+        ax.plot(hist["date"], roll_h,
+                color="#90CAF9", linewidth=1.2, linestyle=":",
+                label=f"{roll}-period rolling avg")
+        ax.plot(fdf["date"], fdf["forecast"],
+                color="#E53935", linewidth=2.0, linestyle="--",
+                marker="o", markersize=4, label=f"Forecast ({n_periods} periods)")
+        if len(future_dates) > 0:
+            ax.axvspan(future_dates[0], future_dates[-1], alpha=0.06, color="#E53935")
+        ax.axvline(last_date, color="gray", linewidth=1.0, linestyle=":",
+                   label="Forecast start")
+        ax.set_title(
+            f"LSTM {n_periods}-period Forecast — {cfg['cat']} — {cfg['target']}",
+            fontsize=12, fontweight="bold"
+        )
+        ax.set_ylabel(f"{cfg['target']} ({unit})")
+        ax.legend(); ax.grid(True, alpha=0.3)
+        plt.tight_layout(); st.pyplot(fig); plt.close()
+
+        # Bar chart
+        bar_w = max(12, n_periods // 2)
+        fig2, ax2 = plt.subplots(figsize=(bar_w, 4))
+        ax2.bar(fdf["date"].dt.strftime(bar_fmt), fdf["forecast"],
+                color="#7F77DD", edgecolor="white")
+        ax2.set_title(f"Forecast Breakdown — {flabel} Periods", fontsize=11, fontweight="bold")
+        ax2.set_ylabel(f"{cfg['target']} ({unit})")
+        plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha="right")
+        ax2.grid(True, alpha=0.3, axis="y")
+        plt.tight_layout(); st.pyplot(fig2); plt.close()
+
+        st.markdown(
+            '<div class="explain-box">'
+            "<strong>How to read this forecast:</strong> "
+            "Blue = recent actual sales. Grey dotted = rolling average trend. "
+            "The vertical dotted line marks where history ends. "
+            "Red dashed + bars = predicted values. "
+            "<em>Uncertainty grows further into the future</em> — "
+            "later periods are directional estimates, not precise targets."
+            "</div>", unsafe_allow_html=True
+        )
+
+        # Table
+        show = fdf.copy()
+        show["date"]     = show["date"].dt.strftime(date_fmt)
+        show["forecast"] = show["forecast"].apply(lambda v: f"{pfx}{v:,.0f}{sfx}")
+        show.columns     = ["Period", f"Forecast ({unit})"]
+        st.dataframe(show, use_container_width=True, hide_index=True)
+
+        # Download
+        dl = fdf.copy()
+        dl["date"] = dl["date"].dt.strftime(dl_fmt)
+        dl.columns = ["date", f"forecast_{unit}"]
+        st.download_button(
+            "⬇  Download forecast CSV  (use this on the Forecast vs Actual page)",
+            dl.to_csv(index=False).encode(),
+            f"forecast_{n_periods}{freq}.csv", "text/csv",
+            use_container_width=True
+        )
 
 
 # ══════════════════════════════════════════════════════════════════
