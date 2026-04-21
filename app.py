@@ -1054,28 +1054,67 @@ if page == "🔮 Future Predictions":
                     unsafe_allow_html=True
                 )
 
-        # ── Graph 1: Multi-line forecast per group ────────────────
-        st.markdown("#### Forecast per group — line chart")
+        # ── Graph 1: Multi-line chart: history + forecast per group ──
+        st.markdown("#### Historical sales + forecast per group")
+        dc = next(
+            (c for c in df_clean.columns if c.lower() in ("orderdate","date")),
+            df_clean.columns[0]
+        )
         fig, ax = plt.subplots(figsize=(14, 6))
 
         for idx, (grp, fdf) in enumerate(all_results.items()):
             colour = PALETTE[idx % len(PALETTE)]
+
+            # Rebuild this group's history series so we can plot it
+            if group_type == "product" and prod_col:
+                hist_df = df_clean[df_clean[prod_col] == grp]
+            else:
+                grp_code = get_categories(df_clean, pid_col).get(grp, cat_code)
+                hist_df  = df_clean[
+                    df_clean[pid_col].astype(str)
+                    .str.contains(f"NGA-{grp_code}-", na=False)
+                ] if pid_col and pid_col in df_clean.columns else df_clean
+
+            hist_s = aggregate(hist_df, dc, val_col, freq)
+
+            if hist_s is not None and len(hist_s) > 0:
+                # Show only the most recent tail so the chart is readable
+                tail_n  = 12 if freq == "MS" else 90
+                hist_tail = hist_s.tail(tail_n)
+                ax.plot(
+                    hist_tail["date"], hist_tail["total"],
+                    color=colour, linewidth=1.0, alpha=0.5,
+                    label=f"{grp[:25]} — historical"
+                )
+                # Connect history to forecast with a thin bridge
+                last_hist_date  = hist_tail["date"].iloc[-1]
+                last_hist_val   = hist_tail["total"].iloc[-1]
+                first_fc_date   = fdf["date"].iloc[0]
+                first_fc_val    = fdf["forecast"].iloc[0]
+                ax.plot(
+                    [last_hist_date, first_fc_date],
+                    [last_hist_val, first_fc_val],
+                    color=colour, linewidth=0.8, linestyle=":", alpha=0.5
+                )
+
+            # Forecast line
             ax.plot(
                 fdf["date"], fdf["forecast"],
-                color=colour, linewidth=1.8, linestyle="--",
+                color=colour, linewidth=2.0, linestyle="--",
                 marker="o", markersize=3,
-                label=grp[:35]
+                label=f"{grp[:25]} — forecast"
             )
 
         if len(future_dates) > 0:
             ax.axvspan(future_dates[0], future_dates[-1], alpha=0.04, color="gray")
-        ax.axvline(last_date, color="gray", linewidth=1.0, linestyle=":", label="Forecast start")
+        ax.axvline(last_date, color="gray", linewidth=1.0,
+                   linestyle=":", label="Forecast start")
         ax.set_title(
             f"LSTM {n_periods}-period Forecast by {group_type.title()} — {cfg['target']}",
             fontsize=12, fontweight="bold"
         )
         ax.set_ylabel(f"{cfg['target']} ({unit})")
-        ax.legend(loc="upper left", fontsize=8, ncol=2)
+        ax.legend(loc="upper left", fontsize=7, ncol=2)
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
         st.pyplot(fig)
@@ -1083,10 +1122,10 @@ if page == "🔮 Future Predictions":
 
         st.markdown(
             '<div class="explain-box">'
-            f"<strong>Reading this chart:</strong> Each coloured dashed line represents one "
-            f"{group_type}'s independently forecast sales. "
-            "Lines that climb steeply indicate the model detecting an upward trend in that "
-            f"{group_type}'s recent history. Lines that flatten indicate stable or declining demand. "
+            f"<strong>Reading this chart:</strong> Each colour represents one {group_type}. "
+            "The solid lighter line is recent actual historical sales for that group. "
+            "The dashed line is the independently forecast values going forward. "
+            "A dotted bridge connects where history ends to where the forecast begins. "
             "<em>Uncertainty grows further into the future</em> — "
             "treat later periods as directional estimates."
             "</div>", unsafe_allow_html=True
@@ -1351,7 +1390,7 @@ if page == "✅ Forecast vs Actual":
 
     # ── Process ───────────────────────────────────────────────────
     with st.spinner("Processing…"):
-        # Forecast series
+        # Parse forecast file
         fc_df[fc_date] = pd.to_datetime(fc_df[fc_date], dayfirst=True, errors="coerce")
         fc_df[fc_val]  = pd.to_numeric(
             fc_df[fc_val].astype(str)
@@ -1359,20 +1398,17 @@ if page == "✅ Forecast vs Actual":
             .str.replace("₦", "", regex=False),
             errors="coerce"
         )
-        fc_s = (
-            fc_df.dropna(subset=[fc_date])
-            .set_index(fc_date)[fc_val]
-            .resample(fva_fcode).sum()
-            .reset_index()
-            .rename(columns={fc_date: "date", fc_val: "forecast"})
-        )
-        # Remove Sundays from daily forecast series
-        if fva_fcode == "D":
-            fc_s = fc_s[fc_s["date"].dt.weekday != 6].reset_index(drop=True)
+        fc_df = fc_df.dropna(subset=[fc_date])
 
-        # Actual series — apply filter
+        # Check if forecast CSV has a group column (exported from per-group mode)
+        fc_grp_col = None
+        for candidate in ("group", "product", "category", "Product / Category"):
+            if candidate in fc_df.columns:
+                fc_grp_col = candidate
+                break
+
+        # Parse actual data
         act_c = clean_df(act_raw, act_date, act_val)
-
         if fva_filter == "Product Category" and fva_cat_code and pid_col_fva:
             act_c = act_c[
                 act_c[pid_col_fva].astype(str)
@@ -1381,130 +1417,275 @@ if page == "✅ Forecast vs Actual":
         elif fva_filter == "Specific Products" and fva_prod_list and prod_col_fva:
             act_c = act_c[act_c[prod_col_fva].isin(fva_prod_list)]
 
+    date_fmt_fva = "%b %Y" if fva_fcode == "MS" else "%d/%m/%Y"
+
+    # ── Helper: compute metrics for one merged df ─────────────────
+    def compute_period_metrics(m):
+        m = m.copy()
+        m["error"]     = m["actual"] - m["forecast"]
+        m["smape_pct"] = m.apply(
+            lambda r: round(
+                200 * abs(r["actual"] - r["forecast"]) /
+                (abs(r["actual"]) + abs(r["forecast"]) + 1e-8), 2
+            ), axis=1
+        )
+        m["mape_pct"] = m.apply(
+            lambda r: round(abs(r["actual"] - r["forecast"]) / r["actual"] * 100, 2)
+            if r["actual"] > 0 else np.nan, axis=1
+        )
+        m["rating"] = m["smape_pct"].apply(lambda v: accuracy_label(v)[0])
+        m["period"] = m["date"].dt.strftime(date_fmt_fva)
+        return m
+
+    def plot_fva_chart(m, title):
+        fig, ax = plt.subplots(figsize=(14, 4))
+        ax.plot(m["date"], m["actual"],
+                color="#1565C0", linewidth=1.2, label="Actual",
+                marker="o", markersize=4)
+        ax.plot(m["date"], m["forecast"],
+                color="#E53935", linewidth=1.2, linestyle="--",
+                label="Forecast", marker="s", markersize=4)
+        ax.fill_between(m["date"],
+                        np.minimum(m["actual"], m["forecast"]),
+                        np.maximum(m["actual"], m["forecast"]),
+                        alpha=0.12, color="#E53935", label="Error Band")
+        ax.set_title(title, fontsize=12, fontweight="bold")
+        ax.set_ylabel(f"Value ({unit_fva})")
+        ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        return fig
+
+    def show_fva_table(m):
+        disp = m[["period","forecast","actual","error","smape_pct","mape_pct","rating"]].copy()
+        disp.columns = [
+            "Period", f"Forecast ({unit_fva})", f"Actual ({unit_fva})",
+            f"Error ({unit_fva})", "sMAPE (%)", "MAPE (%)", "Rating"
+        ]
+        for c in [f"Forecast ({unit_fva})", f"Actual ({unit_fva})", f"Error ({unit_fva})"]:
+            disp[c] = disp[c].apply(lambda v: f"{v:,.0f}")
+        st.dataframe(disp, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
+    # ══════════════════════════════════════════════════════════════
+    # PER-GROUP FvA — forecast CSV has a group column
+    # ══════════════════════════════════════════════════════════════
+    if fc_grp_col:
+        groups_in_fc = fc_df[fc_grp_col].dropna().unique().tolist()
+        st.markdown(
+            f"### Per-{fc_grp_col} comparison  "
+            f"({len(groups_in_fc)} group(s) detected in forecast file)"
+        )
+        st.caption(
+            "The forecast file contains a group column. "
+            "Each group is compared against its own slice of the actual data."
+        )
+
+        all_dl_rows = []   # collect all rows for one combined CSV download
+
+        for grp in groups_in_fc:
+            st.markdown(f"---\n#### {grp}")
+
+            # Forecast slice for this group
+            fc_grp = (
+                fc_df[fc_df[fc_grp_col] == grp]
+                .copy()
+                .rename(columns={fc_date: "date", fc_val: "forecast"})
+            )
+            fc_grp["date"] = pd.to_datetime(fc_grp["date"], dayfirst=True, errors="coerce")
+            fc_grp = fc_grp.dropna(subset=["date"])
+            fc_agg = (
+                fc_grp.set_index("date")["forecast"]
+                .resample(fva_fcode).sum()
+                .reset_index()
+            )
+            if fva_fcode == "D":
+                fc_agg = fc_agg[fc_agg["date"].dt.weekday != 6].reset_index(drop=True)
+
+            # Actual slice for this group
+            if prod_col_fva and prod_col_fva in act_c.columns:
+                act_grp = act_c[act_c[prod_col_fva] == grp]
+            elif pid_col_fva and pid_col_fva in act_c.columns:
+                # Try matching by category code embedded in productId
+                cats_map = get_categories(act_c, pid_col_fva)
+                grp_code = cats_map.get(grp)
+                if grp_code:
+                    act_grp = act_c[
+                        act_c[pid_col_fva].astype(str)
+                        .str.contains(f"NGA-{grp_code}-", na=False)
+                    ]
+                else:
+                    act_grp = act_c
+            else:
+                act_grp = act_c
+
+            act_agg = (
+                act_grp.set_index(act_date)[act_val]
+                .resample(fva_fcode).sum()
+                .reset_index()
+                .rename(columns={act_date: "date", act_val: "actual"})
+            )
+            if fva_fcode == "D":
+                act_agg = act_agg[act_agg["date"].dt.weekday != 6].reset_index(drop=True)
+
+            merged_grp = pd.merge(fc_agg, act_agg, on="date", how="inner")
+            merged_grp = merged_grp[(merged_grp["forecast"] > 0) | (merged_grp["actual"] > 0)]
+
+            if len(merged_grp) == 0:
+                st.warning(f"No overlapping dates for '{grp}'. Skipping.")
+                continue
+
+            merged_grp = compute_period_metrics(merged_grp)
+
+            # Metrics
+            ya_g = merged_grp["actual"].values
+            yf_g = merged_grp["forecast"].values
+            rmse_g = float(np.sqrt(mean_squared_error(ya_g, yf_g)))
+            mae_g  = float(mean_absolute_error(ya_g, yf_g))
+            sm_g   = calc_smape(ya_g, yf_g)
+            mp_g, nm_g = calc_mape(ya_g, yf_g, float(np.mean(ya_g)))
+            lbl_g, cls_g = accuracy_label(sm_g)
+
+            mg1, mg2, mg3, mg4, mg5 = st.columns(5)
+            mg1.metric("RMSE",   f"{unit_fva}{rmse_g:,.0f}")
+            mg2.metric("MAE",    f"{unit_fva}{mae_g:,.0f}")
+            mg3.metric("sMAPE",  f"{sm_g:.2f}%")
+            mg4.metric("MAPE",   f"{mp_g:.2f}%" if not np.isnan(mp_g) else "N/A")
+            mg5.metric("Rating", lbl_g)
+
+            st.markdown(
+                f'<div class="explain-box">'
+                f"<strong>Accuracy: <span class='{cls_g}'>{lbl_g}</span></strong> — "
+                f"sMAPE {sm_g:.2f}%, MAE {unit_fva}{mae_g:,.0f} per period "
+                f"across {len(merged_grp)} periods."
+                f"</div>", unsafe_allow_html=True
+            )
+
+            # Chart
+            fig_g = plot_fva_chart(merged_grp, f"Forecast vs Actual — {grp}")
+            st.pyplot(fig_g); plt.close()
+
+            # Table
+            st.markdown("**Period-by-period breakdown**")
+            show_fva_table(merged_grp)
+
+            # Collect for combined download
+            for _, row in merged_grp.iterrows():
+                all_dl_rows.append({
+                    "group":            grp,
+                    "period":           row["period"],
+                    f"forecast_{unit_fva}": round(row["forecast"], 2),
+                    f"actual_{unit_fva}":   round(row["actual"],   2),
+                    f"error_{unit_fva}":    round(row["error"],    2),
+                    "smape_pct":        row["smape_pct"],
+                    "mape_pct":         row["mape_pct"],
+                    "rating":           row["rating"],
+                })
+
+        # Accuracy scale + combined download
+        st.markdown("---")
+        acc_scale_table()
+
+        if all_dl_rows:
+            dl_all = pd.DataFrame(all_dl_rows)
+            st.download_button(
+                "⬇  Download full per-group comparison as CSV",
+                dl_all.to_csv(index=False).encode(),
+                "forecast_vs_actual_by_group.csv", "text/csv",
+                use_container_width=True
+            )
+
+    # ══════════════════════════════════════════════════════════════
+    # COMBINED FvA — standard single-series comparison
+    # ══════════════════════════════════════════════════════════════
+    else:
+        fc_s = (
+            fc_df.set_index(fc_date)[fc_val]
+            .resample(fva_fcode).sum()
+            .reset_index()
+            .rename(columns={fc_date: "date", fc_val: "forecast"})
+        )
+        if fva_fcode == "D":
+            fc_s = fc_s[fc_s["date"].dt.weekday != 6].reset_index(drop=True)
+
         act_s = (
             act_c.set_index(act_date)[act_val]
             .resample(fva_fcode).sum()
             .reset_index()
             .rename(columns={act_date: "date", act_val: "actual"})
         )
-        # Remove Sundays from daily actual series
         if fva_fcode == "D":
             act_s = act_s[act_s["date"].dt.weekday != 6].reset_index(drop=True)
 
         merged = pd.merge(fc_s, act_s, on="date", how="inner")
         merged = merged[(merged["forecast"] > 0) | (merged["actual"] > 0)]
 
-    if len(merged) == 0:
-        st.error(
-            "No overlapping dates found between forecast and actual. "
-            "Check that the date ranges match and the same aggregation level is used."
-        )
-        st.stop()
-
-    # Per-period metrics
-    merged["error"]     = merged["actual"] - merged["forecast"]
-    merged["smape_pct"] = merged.apply(
-        lambda r: round(
-            200 * abs(r["actual"] - r["forecast"]) /
-            (abs(r["actual"]) + abs(r["forecast"]) + 1e-8), 2
-        ), axis=1
-    )
-    merged["mape_pct"] = merged.apply(
-        lambda r: round(abs(r["actual"] - r["forecast"]) / r["actual"] * 100, 2)
-        if r["actual"] > 0 else np.nan, axis=1
-    )
-    merged["rating"] = merged["smape_pct"].apply(lambda v: accuracy_label(v)[0])
-    date_fmt = "%b %Y" if fva_fcode == "MS" else "%d/%m/%Y"
-    merged["period"] = merged["date"].dt.strftime(date_fmt)
-
-    # Overall metrics
-    ya, yf   = merged["actual"].values, merged["forecast"].values
-    ov_rmse  = float(np.sqrt(mean_squared_error(ya, yf)))
-    ov_mae   = float(mean_absolute_error(ya, yf))
-    ov_sm    = calc_smape(ya, yf)
-    ov_mp, nm = calc_mape(ya, yf, float(np.mean(ya)))
-    ov_lbl, ov_cls = accuracy_label(ov_sm)
-
-    st.markdown("---")
-    st.markdown("### Overall accuracy")
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("RMSE",   f"{unit_fva}{ov_rmse:,.0f}")
-    m2.metric("MAE",    f"{unit_fva}{ov_mae:,.0f}")
-    m3.metric("sMAPE",  f"{ov_sm:.2f}%")
-    m4.metric("MAPE",   f"{ov_mp:.2f}%" if not np.isnan(ov_mp) else "N/A")
-    m5.metric("Rating", ov_lbl)
-
-    st.markdown(
-        f'<div class="explain-box">'
-        f"<strong>Overall accuracy: <span class='{ov_cls}'>{ov_lbl}</span></strong><br>"
-        f"Across {len(merged)} overlapping periods — "
-        f"sMAPE {ov_sm:.2f}%, MAE {unit_fva}{ov_mae:,.0f} per period. "
-        f"MAPE evaluated on {nm}/{len(merged)} periods (zero-actual periods excluded)."
-        f"</div>", unsafe_allow_html=True
-    )
-    acc_scale_table()
-
-    # Chart
-    st.markdown("### Forecast vs Actual chart")
-    fig, ax = plt.subplots(figsize=(14, 5))
-    ax.plot(merged["date"], merged["actual"],
-            color="#1565C0", linewidth=1.2, label="Actual", marker="o", markersize=4)
-    ax.plot(merged["date"], merged["forecast"],
-            color="#E53935", linewidth=1.2, linestyle="--",
-            label="Forecast", marker="s", markersize=4)
-    ax.fill_between(merged["date"],
-                    np.minimum(merged["actual"], merged["forecast"]),
-                    np.maximum(merged["actual"], merged["forecast"]),
-                    alpha=0.12, color="#E53935", label="Error Band")
-    ax.set_title("Forecast vs Actual", fontsize=13, fontweight="bold")
-    ax.set_ylabel(f"Value ({unit_fva})")
-    ax.legend(); ax.grid(True, alpha=0.3)
-    plt.tight_layout(); st.pyplot(fig); plt.close()
-
-    # Period-by-period table
-    st.markdown("### Period-by-period breakdown")
-    disp = merged[["period","forecast","actual","error","smape_pct","mape_pct","rating"]].copy()
-    disp.columns = [
-        "Period", f"Forecast ({unit_fva})", f"Actual ({unit_fva})",
-        f"Error ({unit_fva})", "sMAPE (%)", "MAPE (%)", "Rating"
-    ]
-    for c in [f"Forecast ({unit_fva})", f"Actual ({unit_fva})", f"Error ({unit_fva})"]:
-        disp[c] = disp[c].apply(lambda v: f"{v:,.0f}")
-    st.dataframe(disp, use_container_width=True, hide_index=True)
-
-    # Per-product breakdown
-    if prod_col_fva and prod_col_fva in act_c.columns:
-        st.markdown("### Per-product breakdown")
-        st.caption(
-            "Total actual sales/quantity per product per period "
-            "(based on the filtered actual data)."
-        )
-        pivot = breakdown_by_group(act_c, act_date, act_val, prod_col_fva, fva_fcode)
-        if pivot is not None and len(pivot) > 0:
-            # Format numeric columns
-            num_cols = [c for c in pivot.columns if c != "period"]
-            for c in num_cols:
-                pivot[c] = pivot[c].apply(lambda v: f"{v:,.0f}")
-            st.dataframe(pivot, use_container_width=True, hide_index=True)
-            st.download_button(
-                "⬇  Download product breakdown CSV",
-                pivot.to_csv(index=False).encode(),
-                "product_breakdown.csv", "text/csv"
+        if len(merged) == 0:
+            st.error(
+                "No overlapping dates found. "
+                "Check that date ranges match and the same aggregation level is used."
             )
-        else:
-            st.info("No product-level data to display for this filter selection.")
+            st.stop()
 
-    # Download full comparison
-    dl = merged[["period","forecast","actual","error","smape_pct","mape_pct","rating"]].copy()
-    dl.columns = [
-        "period", f"forecast_{unit_fva}", f"actual_{unit_fva}",
-        f"error_{unit_fva}", "smape_pct", "mape_pct", "rating"
-    ]
-    st.download_button(
-        "⬇  Download full comparison as CSV",
-        dl.to_csv(index=False).encode(),
-        "forecast_vs_actual.csv", "text/csv", use_container_width=True
-    )
+        merged = compute_period_metrics(merged)
+
+        ya, yf   = merged["actual"].values, merged["forecast"].values
+        ov_rmse  = float(np.sqrt(mean_squared_error(ya, yf)))
+        ov_mae   = float(mean_absolute_error(ya, yf))
+        ov_sm    = calc_smape(ya, yf)
+        ov_mp, nm = calc_mape(ya, yf, float(np.mean(ya)))
+        ov_lbl, ov_cls = accuracy_label(ov_sm)
+
+        st.markdown("### Overall accuracy")
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("RMSE",   f"{unit_fva}{ov_rmse:,.0f}")
+        m2.metric("MAE",    f"{unit_fva}{ov_mae:,.0f}")
+        m3.metric("sMAPE",  f"{ov_sm:.2f}%")
+        m4.metric("MAPE",   f"{ov_mp:.2f}%" if not np.isnan(ov_mp) else "N/A")
+        m5.metric("Rating", ov_lbl)
+
+        st.markdown(
+            f'<div class="explain-box">'
+            f"<strong>Overall accuracy: <span class='{ov_cls}'>{ov_lbl}</span></strong><br>"
+            f"Across {len(merged)} periods — sMAPE {ov_sm:.2f}%, "
+            f"MAE {unit_fva}{ov_mae:,.0f} per period. "
+            f"MAPE on {nm}/{len(merged)} periods (zero-actual excluded)."
+            f"</div>", unsafe_allow_html=True
+        )
+        acc_scale_table()
+
+        st.markdown("### Forecast vs Actual chart")
+        fig = plot_fva_chart(merged, "Forecast vs Actual")
+        st.pyplot(fig); plt.close()
+
+        st.markdown("### Period-by-period breakdown")
+        show_fva_table(merged)
+
+        # Per-product breakdown (actual data only)
+        if prod_col_fva and prod_col_fva in act_c.columns:
+            st.markdown("### Per-product actual breakdown")
+            pivot = breakdown_by_group(act_c, act_date, act_val, prod_col_fva, fva_fcode)
+            if pivot is not None and len(pivot) > 0:
+                num_cols = [c for c in pivot.columns if c != "period"]
+                for c in num_cols:
+                    pivot[c] = pivot[c].apply(lambda v: f"{v:,.0f}")
+                st.dataframe(pivot, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇  Download product breakdown CSV",
+                    pivot.to_csv(index=False).encode(),
+                    "product_breakdown.csv", "text/csv"
+                )
+
+        dl = merged[["period","forecast","actual","error","smape_pct","mape_pct","rating"]].copy()
+        dl.columns = [
+            "period", f"forecast_{unit_fva}", f"actual_{unit_fva}",
+            f"error_{unit_fva}", "smape_pct", "mape_pct", "rating"
+        ]
+        st.download_button(
+            "⬇  Download comparison as CSV",
+            dl.to_csv(index=False).encode(),
+            "forecast_vs_actual.csv", "text/csv", use_container_width=True
+        )
 
 
 # ══════════════════════════════════════════════════════════════════
