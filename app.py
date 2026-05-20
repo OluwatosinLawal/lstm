@@ -261,12 +261,12 @@ def aggregate(df, date_col, val_col, freq,
     )
     series = series[series["total"] > 0].reset_index(drop=True)
 
-    # Remove bottom 1% outlier days
-    thresh = series["total"].quantile(0.01)
-    series = series[series["total"] > thresh].reset_index(drop=True)
-
-    # ── Exclude Sundays from daily series ────────────────────────
+    # Remove bottom 1% outlier periods for daily only.
+    # Monthly totals are never near-zero anomalies so outlier removal is skipped.
     if freq == "D":
+        thresh = series["total"].quantile(0.01)
+        series = series[series["total"] > thresh].reset_index(drop=True)
+        # Exclude Sundays from daily series
         series = series[series["date"].dt.weekday != 6].reset_index(drop=True)
 
     return series if len(series) > 0 else None
@@ -534,15 +534,19 @@ def upload_and_configure(pk):
             st.error("No data after filtering and aggregation. Try a broader filter or upload more data.")
             return None, None
 
-        lb          = get_lb(freq)
-        min_periods = lb + 3
+        lb = get_lb(freq)
+        # Monthly: lb+1 = 13 months minimum (one look-back + one target period)
+        # Daily:   lb+5 = 65 days minimum
+        min_periods = lb + 1 if freq == "MS" else lb + 5
 
         if len(series) < min_periods:
             unit_word = "months" if freq == "MS" else "trading days"
+            needed = "13 months" if freq == "MS" else f"{min_periods} trading days"
             st.error(
-                f"Only {len(series)} {unit_word} after filtering. "
-                f"Need at least {min_periods}. "
-                "Upload more data, switch to a broader product filter, or try Monthly aggregation."
+                f"Only {len(series)} {unit_word} of data found after filtering. "
+                f"Need at least {needed}. "
+                + ("Upload at least 13 months of data or use All Products." if freq == "MS"
+                   else "Upload more data, switch to a broader filter, or try Monthly aggregation.")
             )
             return None, None
 
@@ -1008,10 +1012,12 @@ if page == "🔮 Future Predictions":
 
             grp_series = aggregate(grp_df, dc, val_col, freq)
 
-            if grp_series is None or len(grp_series) < lb + 1:
+            grp_min = lb + 1
+            if grp_series is None or len(grp_series) < grp_min:
+                avail = len(grp_series) if grp_series is not None else 0
                 st.warning(
-                    f"Skipping '{grp}' — only {len(grp_series) if grp_series is not None else 0} "
-                    f"periods of data (need at least {lb + 1})."
+                    f"Skipping '{grp}' — only {avail} period(s) of data "
+                    f"(need at least {grp_min}). Upload more historical data for this product."
                 )
                 continue
 
