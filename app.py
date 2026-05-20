@@ -457,9 +457,9 @@ def upload_and_configure(pk):
         freq = "D" if freq_label == "Daily" else "MS"
 
     with fc2:
-        tgt_options = ["Sales Amount (₦)"]
+        tgt_options = ["Sales Amount"]
         if qty_col:
-            tgt_options.append("Sales Quantity (units)")
+            tgt_options.append("Sales Quantity")
         target_label = st.selectbox(
             "Forecast target", tgt_options, key=f"{pk}_tgt"
         )
