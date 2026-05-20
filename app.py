@@ -457,9 +457,9 @@ def upload_and_configure(pk):
         freq = "D" if freq_label == "Daily" else "MS"
 
     with fc2:
-        tgt_options = ["Sales Amount"]
+        tgt_options = ["Sales Amount (₦)"]
         if qty_col:
-            tgt_options.append("Sales Quantity")
+            tgt_options.append("Sales Quantity (units)")
         target_label = st.selectbox(
             "Forecast target", tgt_options, key=f"{pk}_tgt"
         )
@@ -765,7 +765,8 @@ if page == "📂 Upload & Forecast":
     ax1.plot(series["date"], roll_s, color="#E53935", linewidth=1.5,
              label=f"{roll}-period rolling avg")
     ax1.set_title(f"{flabel} {cfg['target']} — {cfg['cat']}", fontsize=12, fontweight="bold")
-    ax1.set_ylabel(f"{cfg['target']} ({unit})")
+    ax1.set_ylabel(cfg['target'])
+    ax1.set_xlabel("Month" if freq == "MS" else "Date", fontsize=10)
     ax1.legend(); ax1.grid(True, alpha=0.3)
     plt.tight_layout(); st.pyplot(fig1); plt.close()
 
@@ -788,7 +789,8 @@ if page == "📂 Upload & Forecast":
                      np.minimum(y_actual, y_pred), np.maximum(y_actual, y_pred),
                      alpha=0.12, color="#E53935", label="Error Band")
     ax2.set_title("LSTM Forecast vs Actual", fontsize=12, fontweight="bold")
-    ax2.set_ylabel(f"{cfg['target']} ({unit})")
+    ax2.set_ylabel(cfg['target'])
+    ax2.set_xlabel("Month" if freq == "MS" else "Date", fontsize=10)
     ax2.legend(); ax2.grid(True, alpha=0.3)
     plt.tight_layout(); st.pyplot(fig2); plt.close()
 
@@ -1119,7 +1121,11 @@ if page == "🔮 Future Predictions":
             f"LSTM {n_periods}-period Forecast by {group_type.title()} — {cfg['target']}",
             fontsize=12, fontweight="bold"
         )
-        ax.set_ylabel(f"{cfg['target']} ({unit})")
+        # cfg['target'] already contains the unit e.g. 'Sales Amount (₦)'
+        # so use it directly to avoid doubling the symbol
+        ax.set_ylabel(cfg['target'])
+        x_label = "Month" if freq == "MS" else "Date"
+        ax.set_xlabel(x_label, fontsize=10)
         ax.legend(loc="upper left", fontsize=7, ncol=2)
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
@@ -1165,7 +1171,9 @@ if page == "🔮 Future Predictions":
             f"Stacked Forecast — {flabel} Periods — all {group_type}s",
             fontsize=11, fontweight="bold"
         )
-        ax2.set_ylabel(f"{cfg['target']} ({unit})")
+        ax2.set_ylabel(cfg['target'])  # already contains unit symbol
+        x_label2 = "Month" if freq == "MS" else "Date"
+        ax2.set_xlabel(x_label2, fontsize=10)
         plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha="right")
         ax2.legend(loc="upper left", fontsize=8, ncol=2)
         ax2.grid(True, alpha=0.3, axis="y")
@@ -1254,7 +1262,8 @@ if page == "🔮 Future Predictions":
             f"LSTM {n_periods}-period Forecast — {cfg['cat']} — {cfg['target']}",
             fontsize=12, fontweight="bold"
         )
-        ax.set_ylabel(f"{cfg['target']} ({unit})")
+        ax.set_ylabel(cfg['target'])
+        ax.set_xlabel("Month" if freq == "MS" else "Date", fontsize=10)
         ax.legend(); ax.grid(True, alpha=0.3)
         plt.tight_layout(); st.pyplot(fig); plt.close()
 
@@ -1264,7 +1273,8 @@ if page == "🔮 Future Predictions":
         ax2.bar(fdf["date"].dt.strftime(bar_fmt), fdf["forecast"],
                 color="#7F77DD", edgecolor="white")
         ax2.set_title(f"Forecast Breakdown — {flabel} Periods", fontsize=11, fontweight="bold")
-        ax2.set_ylabel(f"{cfg['target']} ({unit})")
+        ax2.set_ylabel(cfg['target'])
+        ax2.set_xlabel("Month" if freq == "MS" else "Date", fontsize=10)
         plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha="right")
         ax2.grid(True, alpha=0.3, axis="y")
         plt.tight_layout(); st.pyplot(fig2); plt.close()
