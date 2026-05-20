@@ -1466,7 +1466,12 @@ if page == "✅ Forecast vs Actual":
                         np.maximum(m["actual"], m["forecast"]),
                         alpha=0.12, color="#E53935", label="Error Band")
         ax.set_title(title, fontsize=12, fontweight="bold")
-        ax.set_ylabel(f"Value ({unit_fva})")
+        # y-axis: show unit without doubling — unit_fva is "₦" or "units"
+        y_label = f"Sales Amount ({unit_fva})" if unit_fva == "₦" else f"Sales Quantity ({unit_fva})"
+        ax.set_ylabel(y_label, fontsize=10)
+        # x-axis: label reflects chosen aggregation level
+        x_label = "Month" if fva_fcode == "MS" else "Date"
+        ax.set_xlabel(x_label, fontsize=10)
         ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
         plt.tight_layout()
         return fig
